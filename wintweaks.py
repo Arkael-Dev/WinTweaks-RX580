@@ -899,7 +899,12 @@ class App:
                 r.stdin.flush()
                 r.wait(10)
             except Exception:
-                r.kill()
+                pass
+            try:
+                if r.poll() is None:
+                    r.kill()
+            except Exception:
+                pass
             self.log("Rekaman selesai & tersimpan.")
             self.notify("Rekaman tersimpan ✓")
         fin() if wait else threading.Thread(target=fin, daemon=True).start()
@@ -924,15 +929,17 @@ class App:
         clock = f"{el // 60:02d}:{el % 60:02d}"
         try:
             if self.rec_btn is not None and self.rec_btn.winfo_exists():
-                self.rec_btn.config(text=L("■ Stop Rekam" if rec_on else "● Mulai Rekam"))
+                self.rec_btn.config(text=L("■ Stop Rekam" if rec_on else
+                                           "… MEMULAI" if self.rec_busy else "● Mulai Rekam"))
         except Exception:
             pass
         # overlay rekam otomatis muncul saat mulai merekam, hilang saat stop (kalau otomatis)
-        if rec_on and not self.rec_prev and not self.rov:
+        act = rec_on or self.rec_busy
+        if act and not self.rec_prev and not self.rov:
             self.show_rov(auto=True)
-        elif not rec_on and self.rec_prev and self.rov and self.rov_auto:
+        elif not act and self.rec_prev and self.rov and self.rov_auto:
             self.hide_rov()
-        self.rec_prev = rec_on
+        self.rec_prev = act
         blink = int(time.time() * 2) % 2
         if self.rov:
             try:
@@ -1193,14 +1200,27 @@ class App:
                     self.msg_lbl.config(text=m)
         except (queue.Empty, tk.TclError):
             pass
-        self.refresh_ui()
+        except Exception as e:
+            self.logbox_err(f"UI: {e}")
+        try:
+            self.refresh_ui()
+        except Exception as e:
+            self.logbox_err(f"UI: {e}")
         try:
             if self.cur_page == "Dashboard":
                 self.gpu_lbl.config(text=f"CPU: {L(self.stats.cpu_name)}   |   "
                                          f"GPU: {L(self.stats.gpu_name)}")
-        except tk.TclError:
+        except Exception:
             pass
         self.root.after(200, self.poll)
+
+    def logbox_err(self, m):  # catat error UI sekali saja, jangan spam
+        if getattr(self, "_last_err", None) != m:
+            self._last_err = m
+            try:
+                self.log(m)
+            except Exception:
+                pass
 
 
 def ensure_admin():
