@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller psutil pillow
+        run: pip install pyinstaller psutil pillow pyaudiowpatch
 
       - name: Build exe
         run: >
@@ -35,6 +35,7 @@ jobs:
           --name WinTweaks
           --icon assets/icon.ico
           --add-data "assets;assets"
+          --hidden-import pyaudiowpatch
           wintweaks.py
 
       - name: Upload artifact
