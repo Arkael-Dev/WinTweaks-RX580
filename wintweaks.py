@@ -1,1096 +1,650 @@
 # -*- coding: utf-8 -*-
-"""WinTweaks - tuning untuk Intel i3 Gen 8 + AMD RX 580 (Windows 10/11).
-
-Semua tweak registry/service/power-plan disimpan nilai aslinya dan bisa
-dikembalikan lewat tombol "Kembalikan (Undo)" / "Restore". Bersih-bersih
-(hapus file temp/cache) tidak bisa di-undo karena filenya memang dihapus.
-
-CATATAN KEAMANAN / SAFETY NOTES
---------------------------------
-- Tidak ada fitur mematikan antivirus permanen. Defender real-time
-  protection hanya bisa dimatikan SEMENTARA lewat API resmi Windows
-  (Set-MpPreference), dan ditolak otomatis kalau Tamper Protection aktif.
-- "Profil Game" mengganti RESOLUSI LAYAR SELURUH SISTEM sementara lewat
-  Windows Display API (ChangeDisplaySettings) sebelum game dibuka, lalu
-  mengembalikannya otomatis saat game ditutup. Ini BUKAN hook/injeksi ke
-  proses game (teknik itu sama dengan cheat engine dan sengaja dihindari),
-  jadi tidak bisa downscale satu window saja tanpa mengubah seluruh layar.
-- Equalizer memakai Equalizer APO (open-source, sistem-wide) kalau sudah
-  terpasang; aplikasi ini hanya menulis preset config, tidak memproses
-  audio sendiri.
-"""
-import ctypes
-from ctypes import wintypes
-import json
-import os
-import platform
-import queue
-import re
-import subprocess
-import sys
-import threading
+"""WinTweaks CPU GPU Universal - tweak, power, record, overlay, audio FX."""
+import ctypes, glob, math, os, queue, shutil, subprocess, sys, threading
+import time, urllib.request, zipfile
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-from tkinter.scrolledtext import ScrolledText
-
-import winreg
-
-APP = "WinTweaks"
-EXE_DIR = os.path.dirname(os.path.abspath(
-    sys.executable if getattr(sys, "frozen", False) else __file__))
-BASE_DIR = getattr(sys, "_MEIPASS", EXE_DIR)
-STATE_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP)
-STATE_FILE = os.path.join(STATE_DIR, "state.json")
-NO_WINDOW = 0x08000000
-
-# ---------------------------------------------------------------- tema
-BG = "#0a0a0a"
-BG2 = "#141414"
-BG3 = "#1e1e1e"
-BORDER = "#2a2a2a"
-RED = "#ED1C24"
-RED_HOVER = "#ff3b42"
-RED_DIM = "#5a0e11"
-FG = "#f2f2f2"
-FG_DIM = "#9a9a9a"
-F_TITLE = ("Segoe UI", 22, "bold")
-F_SUB = ("Segoe UI", 10)
-F_GROUP = ("Segoe UI", 10, "bold")
-F_ITEM = ("Segoe UI", 9)
-F_BTN = ("Segoe UI", 10, "bold")
-
-D, S = winreg.REG_DWORD, winreg.REG_SZ
-HIVES = {"HKCU": winreg.HKEY_CURRENT_USER, "HKLM": winreg.HKEY_LOCAL_MACHINE}
-
-GUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
-ULTIMATE = "e9a42b02-d5df-448d-aa00-03f14749eb61"
-HIGH = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
-BALANCED = "381b4222-f694-41f0-9685-ff5bb260df2e"
-
-LANG = "id"  # diubah oleh App.set_lang()
-
-
-# ======================================================== bahasa / i18n
-STR = {
-    "id": {
-        "subtitle": "Tuning untuk Intel i3 Gen 8 + AMD RX 580",
-        "detected": "Terdeteksi: {0}",
-        "tab_tweaks": "Tweaks",
-        "tab_clean": "Bersih-bersih",
-        "tab_profiles": "Profil Game",
-        "tab_audio": "Audio",
-        "grp_perf": "Performa & Power Plan",
-        "grp_game": "Gaming (RX 580 / Game Mode)",
-        "grp_sys": "Sistem (bisa di-undo)",
-        "grp_clean": "Bersih-bersih (tidak bisa di-undo)",
-        "t_power": "Power plan Ultimate Performance",
-        "t_visual": "Kurangi efek visual (transparansi, delay menu)",
-        "t_startdelay": "Hilangkan delay startup aplikasi",
-        "t_gamemode": "Aktifkan Game Mode",
-        "t_gamedvr": "Matikan Xbox Game DVR / perekaman latar",
-        "t_mmcss": "Prioritas CPU/GPU untuk game (MMCSS)",
-        "t_mouse": "Matikan akselerasi mouse (aktif setelah logout/restart)",
-        "t_wu_off": "Matikan Windows Update",
-        "t_defender_off": "Matikan Defender real-time protection SEMENTARA",
-        "warn_defender": "Ini mematikan proteksi real-time Windows Defender "
-                         "sementara untuk sesi gaming. Nyalakan lagi lewat "
-                         "Undo setelah selesai. Jangan browsing/download "
-                         "file saat ini mati.\n\nLanjutkan?",
-        "t_c_temp": "Temp user (%TEMP%)",
-        "t_c_wtemp": "Temp Windows",
-        "t_c_shader": "Shader cache (DirectX + AMD)",
-        "t_c_recycle": "Kosongkan Recycle Bin",
-        "t_c_wu": "Cache download Windows Update",
-        "restore_point": "Buat restore point sebelum menerapkan",
-        "btn_apply": "TERAPKAN",
-        "btn_undo": "KEMBALIKAN (UNDO)",
-        "clean_confirm": "Bersih-bersih menghapus file temp/cache dan tidak "
-                         "bisa di-undo. Lanjutkan?",
-        "pick_min_one": "Pilih minimal satu tweak.",
-        "undo_confirm": "Kembalikan semua tweak (registry, power plan, "
-                        "Windows Update, Defender, resolusi layar) ke "
-                        "nilai awal?",
-        "profiles_title": "Profil resolusi per game",
-        "profiles_desc": "Ganti resolusi layar SELURUH sistem otomatis "
-                         "saat game ini dibuka, lalu kembali ke resolusi "
-                         "semula saat game ditutup. Ringankan beban GPU "
-                         "RX 580 tanpa masuk ke dalam proses game.",
-        "profiles_name": "Nama",
-        "profiles_exe": "File .exe game",
-        "profiles_browse": "Pilih...",
-        "profiles_w": "Lebar",
-        "profiles_h": "Tinggi",
-        "profiles_add": "Tambah Profil",
-        "profiles_run": "Jalankan",
-        "profiles_remove": "Hapus",
-        "profiles_running": "Game berjalan dengan resolusi {0}x{1}. "
-                            "Resolusi akan kembali otomatis saat game "
-                            "ditutup.",
-        "profiles_restored": "Resolusi layar dikembalikan ke semula.",
-        "profiles_need_fields": "Isi nama, file exe, lebar, dan tinggi "
-                                "dengan benar.",
-        "audio_title": "Equalizer (Equalizer APO)",
-        "audio_desc": "WinTweaks tidak memproses audio sendiri - memakai "
-                      "Equalizer APO (gratis, open-source, system-wide) "
-                      "lalu menulis preset. Kalau belum terpasang, klik "
-                      "tombol unduh di bawah dulu (perlu restart setelah "
-                      "instal).",
-        "audio_installed": "Equalizer APO terdeteksi terpasang.",
-        "audio_not_installed": "Equalizer APO belum terpasang.",
-        "audio_download": "Buka halaman unduh Equalizer APO",
-        "audio_flat": "Flat (matikan semua efek)",
-        "audio_bass": "Bass Boost",
-        "audio_vocal": "Vocal Clarity",
-        "audio_gaming": "Gaming (jejak langkah lebih jelas)",
-        "audio_applied": "Preset '{0}' diterapkan ke Equalizer APO.",
-        "audio_panel": "Buka panel Sound Windows",
-        "log_restore_creating": "Membuat restore point (bisa lama)...",
-        "log_restore_ok": "  Restore point dibuat.",
-        "log_restore_skip": "  Restore point dilewati (System Protection "
-                            "mati, atau sudah ada dalam 24 jam terakhir).",
-        "log_done": "Selesai. Restart PC agar semua tweak aktif penuh.",
-        "log_fail": "  Gagal: {0}",
-        "log_power_ok": "  Power plan aktif.",
-        "log_power_fail": "  Gagal set power plan: {0}",
-        "log_power_fallback": "  Ultimate Performance tidak tersedia, "
-                              "pakai High Performance.",
-        "log_power_restored": "  Power plan dikembalikan.",
-        "log_power_restore_fail": "  Gagal mengembalikan power plan.",
-        "log_wu_off": "  Windows Update dihentikan dan dinonaktifkan.",
-        "log_wu_off2": "  (Bisa dinyalakan lagi lewat Undo kapan saja.)",
-        "log_wu_on": "  Windows Update diaktifkan kembali.",
-        "log_def_off_ok": "  Real-time protection Defender dimatikan "
-                          "SEMENTARA.",
-        "log_def_off_ok2": "  Nyalakan lagi setelah selesai gaming lewat "
-                           "tombol Undo.",
-        "log_def_off_fail": "  Gagal: kemungkinan Tamper Protection aktif. "
-                            "Matikan dulu manual lewat Windows Security > "
-                            "Virus & threat protection settings.",
-        "log_def_on_ok": "  Real-time protection Defender diaktifkan "
-                         "kembali.",
-        "log_def_on_fail": "  Gagal mengaktifkan ulang otomatis. Nyalakan "
-                           "manual lewat Windows Security jika perlu.",
-        "log_cleaned": "  Dibersihkan: {0}",
-        "log_recycle": "  Recycle Bin dikosongkan.",
-        "log_all_restored": "Semua tweak dikembalikan ke nilai awal. "
-                            "Restart PC.",
-    },
-    "en": {
-        "subtitle": "Tuning for Intel i3 Gen 8 + AMD RX 580",
-        "detected": "Detected: {0}",
-        "tab_tweaks": "Tweaks",
-        "tab_clean": "Cleanup",
-        "tab_profiles": "Game Profiles",
-        "tab_audio": "Audio",
-        "grp_perf": "Performance & Power Plan",
-        "grp_game": "Gaming (RX 580 / Game Mode)",
-        "grp_sys": "System (undoable)",
-        "grp_clean": "Cleanup (cannot be undone)",
-        "t_power": "Ultimate Performance power plan",
-        "t_visual": "Reduce visual effects (transparency, menu delay)",
-        "t_startdelay": "Remove app startup delay",
-        "t_gamemode": "Enable Game Mode",
-        "t_gamedvr": "Disable Xbox Game DVR / background recording",
-        "t_mmcss": "CPU/GPU priority for games (MMCSS)",
-        "t_mouse": "Disable mouse acceleration (active after logout/restart)",
-        "t_wu_off": "Disable Windows Update",
-        "t_defender_off": "Disable Defender real-time protection TEMPORARILY",
-        "warn_defender": "This disables Windows Defender real-time "
-                         "protection temporarily for gaming sessions. "
-                         "Turn it back on via Undo when done. Avoid "
-                         "browsing/downloading files while it's off.\n\n"
-                         "Continue?",
-        "t_c_temp": "User temp (%TEMP%)",
-        "t_c_wtemp": "Windows temp",
-        "t_c_shader": "Shader cache (DirectX + AMD)",
-        "t_c_recycle": "Empty Recycle Bin",
-        "t_c_wu": "Windows Update download cache",
-        "restore_point": "Create a restore point before applying",
-        "btn_apply": "APPLY",
-        "btn_undo": "RESTORE (UNDO)",
-        "clean_confirm": "Cleanup deletes temp/cache files and cannot be "
-                         "undone. Continue?",
-        "pick_min_one": "Select at least one tweak.",
-        "undo_confirm": "Restore all tweaks (registry, power plan, "
-                        "Windows Update, Defender, screen resolution) to "
-                        "their original values?",
-        "profiles_title": "Per-game resolution profiles",
-        "profiles_desc": "Automatically switches the WHOLE system's "
-                         "resolution when this game launches, then "
-                         "restores it on exit. Lightens the load on the "
-                         "RX 580 without touching the game's process.",
-        "profiles_name": "Name",
-        "profiles_exe": "Game .exe file",
-        "profiles_browse": "Browse...",
-        "profiles_w": "Width",
-        "profiles_h": "Height",
-        "profiles_add": "Add Profile",
-        "profiles_run": "Launch",
-        "profiles_remove": "Remove",
-        "profiles_running": "Game running at {0}x{1}. Resolution restores "
-                            "automatically when the game closes.",
-        "profiles_restored": "Screen resolution restored.",
-        "profiles_need_fields": "Fill in name, exe file, width and height "
-                                "correctly.",
-        "audio_title": "Equalizer (Equalizer APO)",
-        "audio_desc": "WinTweaks doesn't process audio itself - it drives "
-                      "Equalizer APO (free, open-source, system-wide) and "
-                      "writes presets to it. If it's not installed yet, "
-                      "click the download button below first (restart "
-                      "needed after install).",
-        "audio_installed": "Equalizer APO detected.",
-        "audio_not_installed": "Equalizer APO is not installed.",
-        "audio_download": "Open Equalizer APO download page",
-        "audio_flat": "Flat (disable all effects)",
-        "audio_bass": "Bass Boost",
-        "audio_vocal": "Vocal Clarity",
-        "audio_gaming": "Gaming (clearer footsteps)",
-        "audio_applied": "Preset '{0}' applied to Equalizer APO.",
-        "audio_panel": "Open Windows Sound panel",
-        "log_restore_creating": "Creating restore point (may take a "
-                                "while)...",
-        "log_restore_ok": "  Restore point created.",
-        "log_restore_skip": "  Restore point skipped (System Protection "
-                            "is off, or one was made in the last 24h).",
-        "log_done": "Done. Restart your PC for all tweaks to fully apply.",
-        "log_fail": "  Failed: {0}",
-        "log_power_ok": "  Power plan active.",
-        "log_power_fail": "  Failed to set power plan: {0}",
-        "log_power_fallback": "  Ultimate Performance unavailable, using "
-                              "High Performance.",
-        "log_power_restored": "  Power plan restored.",
-        "log_power_restore_fail": "  Failed to restore power plan.",
-        "log_wu_off": "  Windows Update stopped and disabled.",
-        "log_wu_off2": "  (Can be re-enabled via Undo anytime.)",
-        "log_wu_on": "  Windows Update re-enabled.",
-        "log_def_off_ok": "  Defender real-time protection disabled "
-                          "TEMPORARILY.",
-        "log_def_off_ok2": "  Turn it back on via Undo when done gaming.",
-        "log_def_off_fail": "  Failed: Tamper Protection is likely on. "
-                            "Disable it manually in Windows Security > "
-                            "Virus & threat protection settings first.",
-        "log_def_on_ok": "  Defender real-time protection re-enabled.",
-        "log_def_on_fail": "  Could not re-enable automatically. Turn it "
-                           "on manually in Windows Security if needed.",
-        "log_cleaned": "  Cleaned: {0}",
-        "log_recycle": "  Recycle Bin emptied.",
-        "log_all_restored": "All tweaks restored to original values. "
-                            "Restart your PC.",
-    },
-}
-
-
-def t(key, *args):
-    s = STR[LANG].get(key, key)
-    return s.format(*args) if args else s
-
-
-# ======================================================== util dasar
-def run(args):
-    r = subprocess.run(args, capture_output=True, text=True, errors="ignore",
-                       creationflags=NO_WINDOW)
-    return r.returncode, (r.stdout + r.stderr).strip()
-
-
-def run_ps(script):
-    return run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-Command", script])
-
-
-def windows_label():
-    try:
-        build = int(platform.version().split(".")[-1])
-    except (ValueError, IndexError):
-        build = 0
-    if build >= 22000:
-        return "Windows 11"
-    if build >= 10240:
-        return "Windows 10"
-    return f"Windows (build {build})"
-
-
-def load_state():
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            st = json.load(f)
-    except (OSError, ValueError):
-        st = {}
-    st.setdefault("reg", {})
-    st.setdefault("power", {})
-    st.setdefault("flags", {})
-    st.setdefault("profiles", [])
-    st.setdefault("lang", "id")
-    return st
-
-
-def save_state(st):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(st, f, indent=2)
-
-
-def reg_get(hive, path, name):
-    try:
-        with winreg.OpenKey(HIVES[hive], path, 0,
-                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
-            value, typ = winreg.QueryValueEx(k, name)
-            return {"value": value, "type": typ}
-    except OSError:
-        return None
-
-
-def reg_set(hive, path, name, value, typ):
-    with winreg.CreateKeyEx(HIVES[hive], path, 0,
-                            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as k:
-        winreg.SetValueEx(k, name, 0, typ, value)
-
-
-def reg_delete(hive, path, name):
-    try:
-        with winreg.OpenKey(HIVES[hive], path, 0,
-                            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as k:
-            winreg.DeleteValue(k, name)
-    except OSError:
-        pass
-
-
-def fmt_size(n):
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
-
-
-# ======================================================== power plan
-def power_apply(st, log):
-    p = st["power"]
-    if "prev" not in p:
-        _, out = run(["powercfg", "/getactivescheme"])
-        m = GUID_RE.search(out)
-        p["prev"] = m.group(0) if m else BALANCED
-
-    _, listing = run(["powercfg", "/list"])
-    target = p.get("new")
-    if not target or target.lower() not in listing.lower():
-        _, out = run(["powercfg", "-duplicatescheme", ULTIMATE])
-        m = GUID_RE.search(out)
-        target = m.group(0) if m else None
-        p["new"] = target
-    if not target:
-        target = HIGH
-        log(t("log_power_fallback"))
-
-    code, out = run(["powercfg", "/setactive", target])
-    log(t("log_power_ok") if code == 0 else t("log_power_fail", out))
-
-
-def power_undo(st, log):
-    p = st.get("power", {})
-    if p.get("prev"):
-        code, _ = run(["powercfg", "/setactive", p["prev"]])
-        log(t("log_power_restored") if code == 0
-            else t("log_power_restore_fail"))
-    if p.get("new"):
-        run(["powercfg", "/delete", p["new"]])
-
-
-# ======================================================== windows update
-WU_POLICY = r"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
-
-
-def wu_off(st, log):
-    st["reg"].setdefault(f"HKLM|{WU_POLICY}|NoAutoUpdate",
-                         reg_get("HKLM", WU_POLICY, "NoAutoUpdate"))
-    reg_set("HKLM", WU_POLICY, "NoAutoUpdate", 1, D)
-    run(["sc", "config", "wuauserv", "start=", "disabled"])
-    run(["net", "stop", "wuauserv"])
-    st["flags"]["wu_off"] = True
-    log(t("log_wu_off"))
-    log(t("log_wu_off2"))
-
-
-def wu_on(st, log):
-    run(["sc", "config", "wuauserv", "start=", "demand"])
-    run(["net", "start", "wuauserv"])
-    st["flags"]["wu_off"] = False
-    log(t("log_wu_on"))
-
-
-# ======================================================== defender (sementara)
-def defender_off(st, log):
-    code, out = run_ps("Set-MpPreference -DisableRealtimeMonitoring $true")
-    if code == 0:
-        st["flags"]["defender_off"] = True
-        log(t("log_def_off_ok"))
-        log(t("log_def_off_ok2"))
-    else:
-        log(t("log_def_off_fail"))
-
-
-def defender_on(st, log):
-    code, out = run_ps("Set-MpPreference -DisableRealtimeMonitoring $false")
-    if code == 0:
-        st["flags"]["defender_off"] = False
-        log(t("log_def_on_ok"))
-    else:
-        log(t("log_def_on_fail"))
-
-
-# ======================================================== bersih-bersih
-def clean_paths(paths):
-    freed = 0
-    for base in paths:
-        if not base or not os.path.isdir(base):
-            continue
-        for root, dirs, files in os.walk(base, topdown=False):
-            for fname in files:
-                fp = os.path.join(root, fname)
-                try:
-                    size = os.path.getsize(fp)
-                    os.remove(fp)
-                    freed += size
-                except OSError:
-                    pass
-            for dname in dirs:
-                try:
-                    os.rmdir(os.path.join(root, dname))
-                except OSError:
-                    pass
-    return freed
-
-
-def make_cleaner(paths_fn):
-    def _apply(st, log):
-        log(t("log_cleaned", fmt_size(clean_paths(paths_fn()))))
-    return _apply
-
-
-def clean_recycle(st, log):
-    run_ps("Clear-RecycleBin -Force -ErrorAction SilentlyContinue")
-    log(t("log_recycle"))
-
-
-def clean_wu(st, log):
-    run(["net", "stop", "wuauserv"])
-    root = os.environ.get("SystemRoot", r"C:\Windows")
-    freed = clean_paths([os.path.join(root, "SoftwareDistribution", "Download")])
-    run(["net", "start", "wuauserv"])
-    log(t("log_cleaned", fmt_size(freed)))
-
-
-LOCAL = os.environ.get("LOCALAPPDATA", "")
-WINROOT = os.environ.get("SystemRoot", r"C:\Windows")
-
-GRP_PERF, GRP_GAME, GRP_SYS, GRP_CLEAN = "grp_perf", "grp_game", "grp_sys", "grp_clean"
-
-MM = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
-
-TWEAKS = [
-    dict(id="power", group=GRP_PERF, default=True, key="t_power",
-         regs=[], apply=power_apply),
-    dict(id="visual", group=GRP_PERF, default=True, key="t_visual",
-         regs=[
-             ("HKCU", r"Control Panel\Desktop", "MenuShowDelay", "0", S),
-             ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-              "EnableTransparency", 0, D),
-         ]),
-    dict(id="startdelay", group=GRP_PERF, default=True, key="t_startdelay",
-         regs=[("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize",
-                "StartupDelayInMSec", 0, D)]),
-
-    dict(id="gamemode", group=GRP_GAME, default=True, key="t_gamemode",
-         regs=[
-             ("HKCU", r"Software\Microsoft\GameBar", "AutoGameModeEnabled", 1, D),
-             ("HKCU", r"Software\Microsoft\GameBar", "AllowAutoGameMode", 1, D),
-         ]),
-    dict(id="gamedvr", group=GRP_GAME, default=True, key="t_gamedvr",
-         regs=[
-             ("HKCU", r"System\GameConfigStore", "GameDVR_Enabled", 0, D),
-             ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\GameDVR",
-              "AppCaptureEnabled", 0, D),
-         ]),
-    dict(id="mmcss", group=GRP_GAME, default=True, key="t_mmcss",
-         regs=[
-             ("HKLM", MM, "SystemResponsiveness", 10, D),
-             ("HKLM", MM + r"\Tasks\Games", "GPU Priority", 8, D),
-             ("HKLM", MM + r"\Tasks\Games", "Priority", 6, D),
-             ("HKLM", MM + r"\Tasks\Games", "Scheduling Category", "High", S),
-             ("HKLM", MM + r"\Tasks\Games", "SFIO Priority", "High", S),
-         ]),
-    dict(id="mouse", group=GRP_GAME, default=False, key="t_mouse",
-         regs=[
-             ("HKCU", r"Control Panel\Mouse", "MouseSpeed", "0", S),
-             ("HKCU", r"Control Panel\Mouse", "MouseThreshold1", "0", S),
-             ("HKCU", r"Control Panel\Mouse", "MouseThreshold2", "0", S),
-         ]),
-
-    dict(id="wu_off", group=GRP_SYS, default=False, key="t_wu_off",
-         regs=[], apply=wu_off, undo=wu_on),
-    dict(id="defender_off", group=GRP_SYS, default=False, key="t_defender_off",
-         regs=[], apply=defender_off, undo=defender_on, warn="warn_defender"),
-
-    dict(id="c_temp", group=GRP_CLEAN, default=True, key="t_c_temp",
-         regs=[], apply=make_cleaner(lambda: [os.environ.get("TEMP")])),
-    dict(id="c_wtemp", group=GRP_CLEAN, default=True, key="t_c_wtemp",
-         regs=[], apply=make_cleaner(lambda: [os.path.join(WINROOT, "Temp")])),
-    dict(id="c_shader", group=GRP_CLEAN, default=True, key="t_c_shader",
-         regs=[], apply=make_cleaner(lambda: [
-             os.path.join(LOCAL, "D3DSCache"),
-             os.path.join(LOCAL, "AMD", "DxCache"),
-             os.path.join(LOCAL, "AMD", "GLCache"),
-             os.path.join(LOCAL, "AMD", "VkCache"),
-         ])),
-    dict(id="c_recycle", group=GRP_CLEAN, default=False, key="t_c_recycle",
-         regs=[], apply=clean_recycle),
-    dict(id="c_wu", group=GRP_CLEAN, default=False, key="t_c_wu",
-         regs=[], apply=clean_wu),
-]
-
-
-# ======================================================== aksi inti
-def make_restore_point(log):
-    log(t("log_restore_creating"))
-    code, out = run_ps("Checkpoint-Computer -Description 'WinTweaks' "
-                       "-RestorePointType MODIFY_SETTINGS")
-    log(t("log_restore_ok") if code == 0 else t("log_restore_skip"))
-
-
-def apply_tweaks(selected, restore_point, log):
-    st = load_state()
-    if restore_point:
-        make_restore_point(log)
-    for item in selected:
-        log(f"-> {t(item['key'])}")
+from tkinter import messagebox
+
+import psutil
+from PIL import ImageGrab
+
+import core
+from core import (run, run_ps, t, TWEAKS, apply_tweaks, undo_all,
+                  get_current_resolution, EXE_DIR, BASE_DIR, NO_WINDOW)
+
+try:
+    import numpy as np
+    from scipy.signal import sosfilt
+    import pyaudiowpatch as pyaudio
+except Exception:  # audio FX opsional
+    pyaudio = None
+
+THEMES = {"Radeon Red": ("#ff2d3a", "#ff8a3d"), "Cyber Cyan": ("#19e6ff", "#7b5cff"),
+          "Neon Purple": ("#b45cff", "#ff4fd8"), "Matrix Green": ("#2dff8a", "#d4ff3d")}
+BG, SIDE, CARD, CARD2, FG, DIM = "#0b0c10", "#101218", "#171a22", "#1f232d", "#f1f3f8", "#8b92a5"
+FONT = "Segoe UI"
+PICS = os.path.join(os.path.expanduser("~"), "Pictures", "WinTweaks")
+FF_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "WinTweaks", "ffmpeg")
+FF_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+PRESETS = {"Flat": [0] * 10, "Bass Boost": [7, 6, 4, 2, 0, 0, 0, 0, 0, 0],
+           "Vocal Jernih": [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1],
+           "Gaming FPS": [-3, -2, 0, 0, 1, 3, 5, 5, 3, 1],
+           "Cinema 3D": [5, 4, 2, 0, -1, 0, 2, 4, 5, 4]}
+
+
+def mix(c1, c2, f):
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(int(x + (y - x) * f) for x, y in zip(a, b))
+
+
+# ------------------------------------------------------------ stats
+class Stats:
+    def __init__(self):
+        self.cpu = self.gpu = self.ram = 0.0
+        self.fps = None
+        self.gpu_name = "Mendeteksi..."
+        self.amd = False
+        self.on = True
+        for fn in (self._gpu_info, self._loop, self._gpu_loop, self._fps_loop):
+            threading.Thread(target=fn, daemon=True).start()
+
+    def _gpu_info(self):
+        _, out = run_ps("(Get-CimInstance Win32_VideoController).Name -join '|'")
+        names = [n for n in out.split("|") if n]
+        pick = next((n for n in names if "AMD" in n or "Radeon" in n), None)
+        self.amd = pick is not None
+        self.gpu_name = pick or (names[0] if names else "GPU tidak terdeteksi")
+
+    def _loop(self):
+        while self.on:
+            self.cpu = psutil.cpu_percent(interval=1)
+            self.ram = psutil.virtual_memory().percent
+
+    def _gpu_loop(self):  # counter bawaan Windows, jalan untuk semua GPU
+        while self.on:
+            _, out = run(["typeperf", r"\GPU Engine(*engtype_3D)\Utilization Percentage",
+                          "-sc", "1"])
+            try:
+                row = [l for l in out.splitlines() if l.startswith('"')][1]
+                self.gpu = min(100.0, sum(float(x.strip('"')) for x in row.split('","')[1:]))
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    def _fps_loop(self):  # FPS butuh PresentMon.exe di folder app (opsional)
+        pm = (glob.glob(os.path.join(EXE_DIR, "PresentMon*.exe")) +
+              glob.glob(os.path.join(BASE_DIR, "PresentMon*.exe")))
+        if not pm:
+            return
+        hdr = []
+        for flag in ("--output_stdout", "-output_stdout"):
+            p = subprocess.Popen([pm[0], flag, "--stop_existing_session"],
+                                 stdout=subprocess.PIPE, text=True,
+                                 creationflags=NO_WINDOW, errors="ignore")
+            hdr = (p.stdout.readline() or "").strip().lower().split(",")
+            if "processname" in hdr or "application" in hdr:
+                break
         try:
-            for hive, path, name, value, typ in item["regs"]:
-                key = f"{hive}|{path}|{name}"
-                if key not in st["reg"]:
-                    st["reg"][key] = reg_get(hive, path, name)
-                reg_set(hive, path, name, value, typ)
-            if "apply" in item:
-                item["apply"](st, log)
-        except Exception as e:  # noqa: BLE001
-            log(t("log_fail", e))
-        save_state(st)
-    log(t("log_done"))
+            ip = hdr.index("processname") if "processname" in hdr else hdr.index("application")
+            im = hdr.index("msbetweenpresents")
+        except ValueError:
+            return
+        win, last = {}, time.time()
+        for line in p.stdout:
+            c = line.strip().split(",")
+            try:
+                if c[ip].lower() not in ("dwm.exe", "explorer.exe"):
+                    win.setdefault(c[ip], []).append(float(c[im]))
+            except Exception:
+                continue
+            if time.time() - last >= 1:
+                best = max(win.values(), key=len, default=[])
+                self.fps = round(1000 / (sum(best) / len(best))) if best else None
+                win, last = {}, time.time()
 
 
-def undo_all(log):
-    st = load_state()
-    for key, orig in st["reg"].items():
-        hive, path, name = key.split("|", 2)
+# ------------------------------------------------------------ widgets
+class Ring(tk.Canvas):
+    def __init__(self, master, label, size, acc, getter, bg=CARD):
+        super().__init__(master, width=size, height=size, bg=bg, highlightthickness=0)
+        self.s, self.acc, self.get, self.label = size, acc, getter, label
+        self.cur, self.ang, self.bgc = 0.0, 0.0, bg
+        self._tick()
+
+    def _tick(self):
         try:
-            if orig is None:
-                reg_delete(hive, path, name)
-            else:
-                reg_set(hive, path, name, orig["value"], orig["type"])
-        except Exception as e:  # noqa: BLE001
-            log(t("log_fail", f"{name}: {e}"))
-    power_undo(st, log)
-    if st["flags"].get("wu_off"):
-        wu_on(st, log)
-    if st["flags"].get("defender_off"):
-        defender_on(st, log)
-    lang = st.get("lang", "id")
-    save_state({"reg": {}, "power": {}, "flags": {}, "profiles": st.get("profiles", []),
-               "lang": lang})
-    log(t("log_all_restored"))
+            self.cur += (self.get() - self.cur) * 0.15
+            self.ang = (self.ang + 4) % 360
+            s, pad = self.s, self.s * 0.1
+            w = max(4, s * 0.075)
+            col = mix(self.acc[0], self.acc[1], min(1, self.cur / 100))
+            self.delete("all")
+            self.create_oval(pad, pad, s - pad, s - pad, outline=CARD2, width=w)
+            self.create_arc(pad, pad, s - pad, s - pad, start=90, extent=-3.59 * self.cur,
+                            style="arc", outline=mix(self.bgc, col, .35), width=w + 6)
+            self.create_arc(pad, pad, s - pad, s - pad, start=90, extent=-3.59 * self.cur,
+                            style="arc", outline=col, width=w)
+            r, a = s / 2 - pad, math.radians(self.ang)  # titik berputar = "hidup"
+            x, y = s / 2 + r * math.cos(a), s / 2 + r * math.sin(a)
+            self.create_oval(x - 3, y - 3, x + 3, y + 3, fill=FG, outline="")
+            self.create_text(s / 2, s / 2 - s * .04, text=f"{self.cur:.0f}%", fill=FG,
+                             font=(FONT, int(s * .17), "bold"))
+            self.create_text(s / 2, s / 2 + s * .17, text=self.label, fill=DIM,
+                             font=(FONT, int(s * .08)))
+        except tk.TclError:
+            return
+        self.after(33, self._tick)
 
 
-# ======================================================== resolusi layar (ctypes)
-class DEVMODE(ctypes.Structure):
-    _fields_ = [
-        ("dmDeviceName", ctypes.c_wchar * 32),
-        ("dmSpecVersion", wintypes.WORD),
-        ("dmDriverVersion", wintypes.WORD),
-        ("dmSize", wintypes.WORD),
-        ("dmDriverExtra", wintypes.WORD),
-        ("dmFields", wintypes.DWORD),
-        ("dmPositionX", wintypes.LONG),
-        ("dmPositionY", wintypes.LONG),
-        ("dmDisplayOrientation", wintypes.DWORD),
-        ("dmDisplayFixedOutput", wintypes.DWORD),
-        ("dmColor", ctypes.c_short),
-        ("dmDuplex", ctypes.c_short),
-        ("dmYResolution", ctypes.c_short),
-        ("dmTTOption", ctypes.c_short),
-        ("dmCollate", ctypes.c_short),
-        ("dmFormName", ctypes.c_wchar * 32),
-        ("dmLogPixels", wintypes.WORD),
-        ("dmBitsPerPel", wintypes.DWORD),
-        ("dmPelsWidth", wintypes.DWORD),
-        ("dmPelsHeight", wintypes.DWORD),
-        ("dmDisplayFlags", wintypes.DWORD),
-        ("dmDisplayFrequency", wintypes.DWORD),
-    ]
+class Btn(tk.Label):
+    def __init__(self, master, text, cmd, app, primary=True):
+        super().__init__(master, text=text, font=(FONT, 10, "bold"), cursor="hand2",
+                         padx=16, pady=8, fg=FG)
+        self.app, self.pri, self.f = app, primary, 0.0
+        self._col()
+        self.bind("<Enter>", lambda e: self._anim(1))
+        self.bind("<Leave>", lambda e: self._anim(0))
+        self.bind("<Button-1>", lambda e: cmd())
+
+    def _col(self):
+        a = self.app.acc[0]
+        self.config(bg=mix(a, "#ffffff", .18 * self.f) if self.pri else mix(CARD2, a, .35 * self.f))
+
+    def _anim(self, to):
+        self.f = max(0, min(1, self.f + (.25 if to > self.f else -.25)))
+        try:
+            self._col()
+            if self.f not in (0, 1):
+                self.after(20, lambda: self._anim(to))
+        except tk.TclError:
+            pass
 
 
-ENUM_CURRENT_SETTINGS = -1
-DM_PELSWIDTH = 0x00080000
-DM_PELSHEIGHT = 0x00100000
+# ------------------------------------------------------------ audio fx
+class AudioFX:
+    def __init__(self):
+        self.gains, self.pre, self.run_, self.err = [0.0] * 10, 0.0, False, ""
+
+    def _sos(self, fs):
+        out = []
+        for f, g in zip(BANDS, self.gains):
+            A, w0 = 10 ** (g / 40), 2 * math.pi * f / fs
+            al = math.sin(w0) / 2.2
+            b0, b1, b2 = 1 + al * A, -2 * math.cos(w0), 1 - al * A
+            a0, a1, a2 = 1 + al / A, -2 * math.cos(w0), 1 - al / A
+            out.append([b0 / a0, b1 / a0, b2 / a0, 1, a1 / a0, a2 / a0])
+        return np.array(out)
+
+    def outputs(self):
+        if not pyaudio:
+            return []
+        p = pyaudio.PyAudio()
+        res = [d["name"] for d in (p.get_device_info_by_index(i) for i in range(p.get_device_count()))
+               if d["maxOutputChannels"] > 0 and not d.get("isLoopbackDevice")]
+        p.terminate()
+        return list(dict.fromkeys(res))
+
+    def start(self, out_name):
+        if not pyaudio:
+            self.err = "Modul audio tidak ada di build ini."
+            return
+        self.run_ = True
+        threading.Thread(target=self._work, args=(out_name,), daemon=True).start()
+
+    def stop(self):
+        self.run_ = False
+
+    def _work(self, out_name):
+        p = pyaudio.PyAudio()
+        try:
+            lb = p.get_default_wasapi_loopback()
+            out = next(d for d in (p.get_device_info_by_index(i) for i in range(p.get_device_count()))
+                       if out_name in d["name"] and d["maxOutputChannels"] > 0
+                       and not d.get("isLoopbackDevice"))
+            fs, ch = int(lb["defaultSampleRate"]), lb["maxInputChannels"]
+            ins = p.open(format=pyaudio.paInt16, channels=ch, rate=fs, input=True,
+                         input_device_index=lb["index"], frames_per_buffer=1024)
+            outs = p.open(format=pyaudio.paInt16, channels=ch, rate=fs, output=True,
+                          output_device_index=out["index"])
+            sos, zi = self._sos(fs), None
+            zi = np.zeros((sos.shape[0], 2, ch))
+            while self.run_:
+                x = np.frombuffer(ins.read(1024, exception_on_overflow=False), np.int16)
+                x = x.reshape(-1, ch).astype(np.float32)
+                sos = self._sos(fs)
+                y, zi = sosfilt(sos, x, axis=0, zi=zi)
+                y *= 10 ** (self.pre / 20)
+                outs.write(np.clip(y, -32768, 32767).astype(np.int16).tobytes())
+        except Exception as e:
+            self.err = f"Audio FX gagal: {e}"
+        finally:
+            self.run_ = False
+            p.terminate()
 
 
-def get_current_resolution():
-    dm = DEVMODE()
-    dm.dmSize = ctypes.sizeof(DEVMODE)
-    ctypes.windll.user32.EnumDisplaySettingsW(None, ENUM_CURRENT_SETTINGS,
-                                              ctypes.byref(dm))
-    return dm.dmPelsWidth, dm.dmPelsHeight
-
-
-def set_resolution(width, height):
-    dm = DEVMODE()
-    dm.dmSize = ctypes.sizeof(DEVMODE)
-    ctypes.windll.user32.EnumDisplaySettingsW(None, ENUM_CURRENT_SETTINGS,
-                                              ctypes.byref(dm))
-    dm.dmPelsWidth = int(width)
-    dm.dmPelsHeight = int(height)
-    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT
-    return ctypes.windll.user32.ChangeDisplaySettingsW(ctypes.byref(dm), 0)
-
-
-def launch_with_resolution(exe_path, width, height, log):
-    orig = get_current_resolution()
-    set_resolution(width, height)
-    log(t("profiles_running", width, height))
-    try:
-        proc = subprocess.Popen([exe_path], cwd=os.path.dirname(exe_path) or None)
-        proc.wait()
-    finally:
-        set_resolution(*orig)
-        log(t("profiles_restored"))
-
-
-# ======================================================== equalizer apo
-EQ_DIR_CANDIDATES = [
-    r"C:\Program Files\EqualizerAPO",
-    r"C:\Program Files (x86)\EqualizerAPO",
-]
-EQ_DOWNLOAD_URL = "https://sourceforge.net/projects/equalizerapo/"
-
-EQ_PRESETS = {
-    "audio_flat": "# WinTweaks preset: Flat\n",
-    "audio_bass": ("# WinTweaks preset: Bass Boost\n"
-                   "Filter 1: ON LSC Fc 120 Hz Gain 5.0 dB\n"),
-    "audio_vocal": ("# WinTweaks preset: Vocal Clarity\n"
-                    "Filter 1: ON PK Fc 2500 Hz Gain 3.5 dB Q 1.0\n"),
-    "audio_gaming": ("# WinTweaks preset: Gaming\n"
-                     "Filter 1: ON HSC Fc 6000 Hz Gain 3.0 dB\n"
-                     "Filter 2: ON PK Fc 3000 Hz Gain 2.0 dB Q 1.0\n"),
-}
-
-
-def eq_dir():
-    for c in EQ_DIR_CANDIDATES:
-        if os.path.isdir(c):
-            return c
-    return None
-
-
-def eq_apply_preset(preset_key, log):
-    d = eq_dir()
-    if not d:
-        log(t("audio_not_installed"))
-        return
-    cfg = os.path.join(d, "config", "config.txt")
-    try:
-        with open(cfg, "w", encoding="utf-8") as f:
-            f.write(EQ_PRESETS[preset_key])
-        log(t("audio_applied", t(preset_key)))
-    except OSError as e:
-        log(t("log_fail", e))
-
-
-# ======================================================== GUI
+# ------------------------------------------------------------ app
 class App:
     def __init__(self):
-        self.st = load_state()
-        global LANG
-        LANG = self.st.get("lang", "id")
-
         self.root = tk.Tk()
+        self.root.title("WinTweaks CPU GPU Universal")
+        self.root.geometry("1040x680")
+        self.root.minsize(960, 620)
         self.root.configure(bg=BG)
-        self.root.geometry("680x820")
-        self.root.minsize(600, 600)
-        self.q = queue.Queue()
-        self.vars = {}
-        self.busy = False
-
-        self._set_icon()
-        self._style()
-        self._build()
-        self.root.after(100, self.pump)
-        self._fade_in()
-
-    # ---------------------------------------------------- bangun ulang UI
-    def _build(self):
-        self.root.title(f"{APP} - i3 Gen 8 + RX 580")
-        header = tk.Frame(self.root, bg=BG)
-        header.pack(fill="x")
-        self._banner(header)
-
-        sub = tk.Frame(self.root, bg=BG)
-        sub.pack(fill="x", padx=16, pady=(6, 4))
-        tk.Label(sub, text=t("detected", windows_label()), bg=BG,
-                 fg=FG_DIM, font=F_SUB).pack(side="left")
-        lang_box = tk.Frame(sub, bg=BG)
-        lang_box.pack(side="right")
-        self.lang_var = tk.StringVar(value="Indonesia" if LANG == "id" else "English")
-        menu = tk.OptionMenu(lang_box, self.lang_var, "Indonesia", "English",
-                             command=self._on_lang_change)
-        menu.configure(bg=BG3, fg=FG, activebackground=RED, activeforeground="#fff",
-                      highlightthickness=0, bd=0, font=F_SUB)
-        menu["menu"].configure(bg=BG3, fg=FG)
-        menu.pack(side="right")
-
-        nb = ttk.Notebook(self.root, style="WT.TNotebook")
-        nb.pack(fill="both", expand=True, padx=12, pady=(4, 8))
-
-        tab_tweaks = tk.Frame(nb, bg=BG)
-        tab_clean = tk.Frame(nb, bg=BG)
-        tab_profiles = tk.Frame(nb, bg=BG)
-        tab_audio = tk.Frame(nb, bg=BG)
-        nb.add(tab_tweaks, text=t("tab_tweaks"))
-        nb.add(tab_clean, text=t("tab_clean"))
-        nb.add(tab_profiles, text=t("tab_profiles"))
-        nb.add(tab_audio, text=t("tab_audio"))
-
-        self._build_tweaks_tab(tab_tweaks)
-        self._build_clean_tab(tab_clean)
-        self._build_profiles_tab(tab_profiles)
-        self._build_audio_tab(tab_audio)
-
-        self.rp = tk.BooleanVar(value=True)
-        rp_row = tk.Frame(self.root, bg=BG)
-        rp_row.pack(fill="x", padx=16)
-        tk.Checkbutton(rp_row, text=t("restore_point"), variable=self.rp,
-                      bg=BG, fg=FG, selectcolor=BG3, activebackground=BG,
-                      activeforeground=RED, font=F_ITEM).pack(anchor="w")
-
-        bar = tk.Frame(self.root, bg=BG)
-        bar.pack(fill="x", padx=16, pady=8)
-        self.btn_apply = self._make_button(bar, t("btn_apply"), self.on_apply, True)
-        self.btn_apply.pack(side="left", expand=True, fill="x", padx=(0, 4))
-        self.btn_undo = self._make_button(bar, t("btn_undo"), self.on_undo, False)
-        self.btn_undo.pack(side="left", expand=True, fill="x", padx=(4, 0))
-
-        self.logbox = ScrolledText(self.root, height=9, bg="#050505", fg="#d8d8d8",
-                                   insertbackground=FG, font=("Consolas", 9), bd=0,
-                                   highlightthickness=1, highlightbackground=BORDER)
-        self.logbox.pack(fill="both", expand=False, padx=16, pady=(0, 14))
-        self.logbox.configure(state="disabled")
-
-    def _card(self, parent, title_key):
-        box = tk.LabelFrame(parent, text=f"  {t(title_key)}  ", bg=BG2, fg=RED,
-                            font=F_GROUP, labelanchor="nw", bd=1,
-                            highlightbackground=BORDER, highlightthickness=1)
-        box.pack(fill="x", pady=8, ipady=6, padx=2)
-        return box
-
-    def _build_tweaks_tab(self, parent):
-        wrap, main = self._scrollable(parent)
-        for grp in (GRP_PERF, GRP_GAME, GRP_SYS):
-            box = self._card(main, grp)
-            for item in TWEAKS:
-                if item["group"] != grp:
-                    continue
-                self._checkrow(box, item)
-
-    def _build_clean_tab(self, parent):
-        wrap, main = self._scrollable(parent)
-        box = self._card(main, GRP_CLEAN)
-        for item in TWEAKS:
-            if item["group"] != GRP_CLEAN:
-                continue
-            self._checkrow(box, item)
-
-    def _checkrow(self, box, item):
-        v = tk.BooleanVar(value=item["default"])
-        self.vars[item["id"]] = v
-        row = tk.Frame(box, bg=BG2)
-        row.pack(fill="x", padx=10, pady=3)
-        tk.Checkbutton(row, text=t(item["key"]), variable=v, bg=BG2, fg=FG,
-                      selectcolor=BG3, activebackground=BG2, activeforeground=RED,
-                      font=F_ITEM, anchor="w", highlightthickness=0, bd=0
-                      ).pack(side="left", anchor="w")
-        if item.get("warn"):
-            tk.Label(row, text="!", bg=BG2, fg=RED,
-                    font=("Segoe UI", 9, "bold")).pack(side="left", padx=6)
-
-    def _scrollable(self, parent):
-        canvas = tk.Canvas(parent, bg=BG, highlightthickness=0)
-        scroll = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        main = tk.Frame(canvas, bg=BG)
-        main.bind("<Configure>",
-                 lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=main, anchor="nw")
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-        return canvas, main
-
-    # ---------------------------------------------------- tab profil game
-    def _build_profiles_tab(self, parent):
-        wrap, main = self._scrollable(parent)
-        box = self._card(main, "profiles_title")
-        tk.Label(box, text=t("profiles_desc"), bg=BG2, fg=FG_DIM,
-                font=F_SUB, wraplength=560, justify="left").pack(
-            anchor="w", padx=10, pady=(0, 8))
-
-        form = tk.Frame(box, bg=BG2)
-        form.pack(fill="x", padx=10, pady=4)
-        self.p_name = tk.StringVar()
-        self.p_exe = tk.StringVar()
-        self.p_w = tk.StringVar(value="1600")
-        self.p_h = tk.StringVar(value="900")
-
-        def field(label_key, var, width=16):
-            r = tk.Frame(form, bg=BG2)
-            r.pack(fill="x", pady=2)
-            tk.Label(r, text=t(label_key), bg=BG2, fg=FG, font=F_ITEM,
-                    width=12, anchor="w").pack(side="left")
-            tk.Entry(r, textvariable=var, width=width, bg=BG3, fg=FG,
-                     insertbackground=FG, bd=0, highlightthickness=1,
-                     highlightbackground=BORDER).pack(side="left", padx=4)
-            return r
-
-        field("profiles_name", self.p_name, 30)
-        exe_row = field("profiles_exe", self.p_exe, 30)
-        tk.Button(exe_row, text=t("profiles_browse"), command=self._browse_exe,
-                 bg=BG3, fg=FG, bd=0, font=F_ITEM, cursor="hand2",
-                 activebackground=RED).pack(side="left", padx=4)
-        field("profiles_w", self.p_w, 8)
-        field("profiles_h", self.p_h, 8)
-
-        tk.Button(form, text=t("profiles_add"), command=self._add_profile,
-                 bg=RED, fg="#fff", bd=0, font=F_BTN, cursor="hand2",
-                 activebackground=RED_HOVER, pady=6).pack(fill="x", pady=(6, 0))
-
-        self.profiles_list = tk.Frame(box, bg=BG2)
-        self.profiles_list.pack(fill="x", padx=10, pady=(10, 4))
-        self._refresh_profiles()
-
-    def _browse_exe(self):
-        path = filedialog.askopenfilename(filetypes=[("Executable", "*.exe")])
-        if path:
-            self.p_exe.set(path)
-            if not self.p_name.get():
-                self.p_name.set(os.path.splitext(os.path.basename(path))[0])
-
-    def _add_profile(self):
-        try:
-            w, h = int(self.p_w.get()), int(self.p_h.get())
-        except ValueError:
-            messagebox.showinfo(APP, t("profiles_need_fields"))
-            return
-        if not self.p_name.get() or not os.path.isfile(self.p_exe.get()):
-            messagebox.showinfo(APP, t("profiles_need_fields"))
-            return
-        self.st["profiles"].append({"name": self.p_name.get(), "exe": self.p_exe.get(),
-                                    "w": w, "h": h})
-        save_state(self.st)
-        self.p_name.set("")
-        self.p_exe.set("")
-        self._refresh_profiles()
-
-    def _refresh_profiles(self):
-        for w in self.profiles_list.winfo_children():
-            w.destroy()
-        for i, p in enumerate(self.st["profiles"]):
-            row = tk.Frame(self.profiles_list, bg=BG3)
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text=f"{p['name']}  ({p['w']}x{p['h']})", bg=BG3,
-                    fg=FG, font=F_ITEM, anchor="w").pack(side="left", padx=8,
-                                                         pady=6, fill="x",
-                                                         expand=True)
-            tk.Button(row, text=t("profiles_run"), bg=RED, fg="#fff", bd=0,
-                     font=F_ITEM, cursor="hand2", activebackground=RED_HOVER,
-                     command=lambda p=p: self._run_profile(p)
-                     ).pack(side="left", padx=4, pady=4)
-            tk.Button(row, text=t("profiles_remove"), bg=BG2, fg=FG_DIM, bd=0,
-                     font=F_ITEM, cursor="hand2", activebackground=BG,
-                     command=lambda i=i: self._remove_profile(i)
-                     ).pack(side="left", padx=(0, 8), pady=4)
-
-    def _remove_profile(self, idx):
-        del self.st["profiles"][idx]
-        save_state(self.st)
-        self._refresh_profiles()
-
-    def _run_profile(self, p):
-        self.start(lambda: launch_with_resolution(p["exe"], p["w"], p["h"], self.log))
-
-    # ---------------------------------------------------- tab audio
-    def _build_audio_tab(self, parent):
-        wrap, main = self._scrollable(parent)
-        box = self._card(main, "audio_title")
-        tk.Label(box, text=t("audio_desc"), bg=BG2, fg=FG_DIM, font=F_SUB,
-                wraplength=560, justify="left").pack(anchor="w", padx=10,
-                                                      pady=(0, 8))
-        installed = eq_dir() is not None
-        status = t("audio_installed") if installed else t("audio_not_installed")
-        tk.Label(box, text=status, bg=BG2, fg=(FG if installed else RED),
-                font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10)
-
-        if not installed:
-            tk.Button(box, text=t("audio_download"), bg=RED, fg="#fff", bd=0,
-                     font=F_BTN, cursor="hand2", activebackground=RED_HOVER,
-                     pady=6, command=lambda: run(
-                         ["cmd", "/c", "start", "", EQ_DOWNLOAD_URL])
-                     ).pack(fill="x", padx=10, pady=8)
-
-        presets = tk.Frame(box, bg=BG2)
-        presets.pack(fill="x", padx=10, pady=6)
-        for key in ("audio_flat", "audio_bass", "audio_vocal", "audio_gaming"):
-            tk.Button(presets, text=t(key), bg=BG3, fg=FG, bd=0, font=F_ITEM,
-                     cursor="hand2", activebackground=RED, anchor="w", pady=8,
-                     command=lambda k=key: self.start(
-                         lambda: eq_apply_preset(k, self.log))
-                     ).pack(fill="x", pady=2)
-
-        tk.Button(box, text=t("audio_panel"), bg=BG3, fg=FG, bd=0, font=F_ITEM,
-                 cursor="hand2", activebackground=RED, pady=6,
-                 command=lambda: run(["control.exe", "mmsys.cpl", "sounds"])
-                 ).pack(fill="x", padx=10, pady=(6, 10))
-
-    # ---------------------------------------------------- bahasa
-    def _on_lang_change(self, choice):
-        global LANG
-        LANG = "id" if choice == "Indonesia" else "en"
-        self.st["lang"] = LANG
-        save_state(self.st)
-        prev_vals = {k: v.get() for k, v in self.vars.items()}
-        for w in self.root.winfo_children():
-            w.destroy()
-        self.vars = {}
-        self._build()
-        for k, v in prev_vals.items():
-            if k in self.vars:
-                self.vars[k].set(v)
-
-    # ---------------------------------------------------- tampilan dasar
-    def _set_icon(self):
         ico = os.path.join(BASE_DIR, "assets", "icon.ico")
         if os.path.exists(ico):
-            try:
-                self.root.iconbitmap(ico)
-            except tk.TclError:
-                pass
-
-    def _style(self):
-        style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure("Vertical.TScrollbar", background=BG3, troughcolor=BG,
-                        bordercolor=BG, arrowcolor=FG)
-        style.configure("WT.TNotebook", background=BG, borderwidth=0)
-        style.configure("WT.TNotebook.Tab", background=BG2, foreground=FG_DIM,
-                        padding=(14, 8), font=F_ITEM, borderwidth=0)
-        style.map("WT.TNotebook.Tab",
-                 background=[("selected", BG3)],
-                 foreground=[("selected", FG)])
-
-    def _banner(self, parent):
-        png = os.path.join(BASE_DIR, "assets", "banner.png")
-        if os.path.exists(png):
-            try:
-                self._banner_img = tk.PhotoImage(file=png)
-                tk.Label(parent, image=self._banner_img, bg=BG).pack(fill="x")
-                return
-            except tk.TclError:
-                pass
-        tk.Label(parent, text="WinTweaks", bg=BG, fg=RED, font=F_TITLE).pack(
-            anchor="w", padx=16, pady=10)
-
-    def _make_button(self, parent, text, command, accent):
-        b = tk.Button(parent, text=text, command=command,
-                      bg=RED if accent else BG3, fg="#ffffff" if accent else FG,
-                      activebackground=RED_HOVER if accent else BG2,
-                      activeforeground="#ffffff", bd=0, relief="flat",
-                      font=F_BTN, padx=10, pady=11, cursor="hand2")
-        b.bind("<Enter>", lambda e: b.configure(
-            bg=RED_HOVER if accent else BORDER))
-        b.bind("<Leave>", lambda e: b.configure(bg=RED if accent else BG3))
-        return b
-
-    def _fade_in(self, alpha=0.0):
-        try:
-            alpha = min(1.0, alpha + 0.1)
-            self.root.attributes("-alpha", alpha)
-            if alpha < 1.0:
-                self.root.after(12, lambda: self._fade_in(alpha))
-        except tk.TclError:
-            pass
-
-    # ---------------------------------------------------- threading / log
-    def log(self, msg):
-        self.q.put(msg)
-
-    def pump(self):
-        try:
-            while True:
-                msg = self.q.get_nowait()
-                if msg is None:
-                    self.busy = False
-                    self.btn_apply.configure(state="normal")
-                    self.btn_undo.configure(state="normal")
-                    continue
-                self.logbox.configure(state="normal")
-                self.logbox.insert("end", msg + "\n")
-                self.logbox.see("end")
-                self.logbox.configure(state="disabled")
-        except queue.Empty:
-            pass
-        self.root.after(100, self.pump)
-
-    def start(self, fn):
-        if self.busy:
-            return
-        self.busy = True
-        self.btn_apply.configure(state="disabled")
-        self.btn_undo.configure(state="disabled")
-
-        def worker():
-            try:
-                fn()
-            finally:
-                self.q.put(None)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    # ---------------------------------------------------- aksi
-    def on_apply(self):
-        selected = [item for item in TWEAKS if self.vars[item["id"]].get()]
-        if not selected:
-            messagebox.showinfo(APP, t("pick_min_one"))
-            return
-        if any(item["group"] == GRP_CLEAN for item in selected):
-            if not messagebox.askyesno(APP, t("clean_confirm")):
-                return
-        for item in selected:
-            if item.get("warn") and not messagebox.askyesno(APP, t(item["warn"])):
-                return
-        rp = self.rp.get()
-        self.start(lambda: apply_tweaks(selected, rp, self.log))
-
-    def on_undo(self):
-        if messagebox.askyesno(APP, t("undo_confirm")):
-            self.start(lambda: undo_all(self.log))
+            self.root.iconbitmap(ico)
+        self.theme, self.cur_page = "Radeon Red", "Dashboard"
+        self.acc = THEMES[self.theme]
+        self.stats, self.fx, self.q = Stats(), AudioFX(), queue.Queue()
+        self.rec = self.ov = self.logbox = None
+        self.checks = {}
+        self.build()
+        self.root.after(100, self.poll)
 
     def run(self):
         self.root.mainloop()
+        self.stats.on = False
+        self.stop_rec()
+
+    def build(self):
+        for w in self.root.winfo_children():
+            w.destroy()
+        self.acc = THEMES[self.theme]
+        side = tk.Frame(self.root, bg=SIDE, width=210)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        tk.Label(side, text="WinTweaks", bg=SIDE, fg=FG, font=(FONT, 20, "bold")).pack(
+            anchor="w", padx=22, pady=(24, 0))
+        tk.Label(side, text="CPU · GPU · Universal", bg=SIDE, fg=self.acc[0],
+                 font=(FONT, 9, "bold")).pack(anchor="w", padx=22, pady=(0, 22))
+        self.main = tk.Frame(self.root, bg=BG)
+        self.main.pack(side="left", fill="both", expand=True)
+        self.pages = {"Dashboard": self.p_dash, "Tweaks": self.p_tweaks,
+                      "Power CPU/GPU": self.p_power, "Audio FX": self.p_audio,
+                      "Rekam & Screenshot": self.p_rec, "Overlay FPS": self.p_over,
+                      "Tema": self.p_theme}
+        self.navs = {}
+        for name in self.pages:
+            f = tk.Frame(side, bg=SIDE, cursor="hand2")
+            bar = tk.Frame(f, bg=SIDE, width=4)
+            bar.pack(side="left", fill="y")
+            lb = tk.Label(f, text=name, bg=SIDE, fg=DIM, font=(FONT, 11), anchor="w",
+                          padx=18, pady=11)
+            lb.pack(fill="x")
+            f.pack(fill="x")
+            for w in (f, lb):
+                w.bind("<Button-1>", lambda e, n=name: self.go(n))
+                w.bind("<Enter>", lambda e, n=name: self.navs[n][2].config(
+                    fg=FG) if n != self.cur_page else None)
+                w.bind("<Leave>", lambda e, n=name: self.navs[n][2].config(
+                    fg=DIM) if n != self.cur_page else None)
+            self.navs[name] = (f, bar, lb)
+        self.go(self.cur_page)
+
+    def go(self, name):
+        self.cur_page = name
+        for n, (f, bar, lb) in self.navs.items():
+            sel = n == name
+            bg = mix(SIDE, self.acc[0], .14) if sel else SIDE
+            bar.config(bg=self.acc[0] if sel else SIDE)
+            lb.config(fg=FG if sel else DIM, bg=bg)
+            f.config(bg=bg)
+        for w in self.main.winfo_children():
+            w.destroy()
+        self.logbox = None
+        page = tk.Frame(self.main, bg=BG)
+        tk.Label(page, text=name, bg=BG, fg=FG, font=(FONT, 20, "bold")).pack(
+            anchor="w", padx=30, pady=(24, 12))
+        body = tk.Frame(page, bg=BG)
+        body.pack(fill="both", expand=True, padx=30, pady=(0, 20))
+        self.pages[name](body)
+        self.slide(page, 40)
+
+    def slide(self, page, off):  # animasi masuk halaman
+        try:
+            page.place(x=off, y=0, relwidth=1, relheight=1)
+            if off > 0:
+                self.root.after(12, lambda: self.slide(page, int(off * .7)))
+        except tk.TclError:
+            pass
+
+    def card(self, p):
+        return tk.Frame(p, bg=CARD, padx=18, pady=16)
+
+    def lab(self, p, text, dim=False, size=10, bold=False, **kw):
+        return tk.Label(p, text=text, bg=p["bg"], fg=DIM if dim else FG, justify="left",
+                        font=(FONT, size, "bold" if bold else "normal"), **kw)
+
+    def chk(self, p, text, var):
+        return tk.Checkbutton(p, text=text, variable=var, bg=CARD, fg=FG, selectcolor=CARD2,
+                              activebackground=CARD, activeforeground=self.acc[0],
+                              font=(FONT, 9), anchor="w")
+
+    def menu(self, p, var, *opts):
+        m = tk.OptionMenu(p, var, *opts)
+        m.config(bg=CARD2, fg=FG, bd=0, highlightthickness=0, activebackground=CARD2)
+        return m
+
+    def scale(self, p, var=None, **kw):
+        return tk.Scale(p, bg=CARD, fg=FG, troughcolor=CARD2, highlightthickness=0, bd=0,
+                        activebackground=self.acc[0], variable=var, **kw)
+
+    # ---- pages
+    def p_dash(self, b):
+        c = self.card(b)
+        c.pack(fill="x")
+        row = tk.Frame(c, bg=CARD)
+        row.pack()
+        for lbl, fn in (("CPU", lambda: self.stats.cpu), ("GPU", lambda: self.stats.gpu),
+                        ("RAM", lambda: self.stats.ram)):
+            Ring(row, lbl, 170, self.acc, fn).pack(side="left", padx=26)
+        self.gpu_lbl = self.lab(b, "", dim=True)
+        self.gpu_lbl.pack(anchor="w", pady=12)
+        self.lab(b, f"CPU: {psutil.cpu_count(False)} core / {psutil.cpu_count()} thread  ·  "
+                    f"{core.windows_label()}", dim=True).pack(anchor="w")
+        self.lab(b, "Mode universal: tweak, power plan, rekam & overlay jalan di semua PC. "
+                    "Fitur khusus GPU (Adrenalin, encoder AMF) hanya aktif di AMD.",
+                 dim=True, wraplength=700).pack(anchor="w", pady=14)
+
+    def p_tweaks(self, b):
+        grid = tk.Frame(b, bg=BG)
+        grid.pack(fill="x")
+        groups = {}
+        for it in TWEAKS:
+            groups.setdefault(it["group"], []).append(it)
+        self.checks = {}
+        for i, (g, items) in enumerate(groups.items()):
+            c = self.card(grid)
+            c.grid(row=i // 2, column=i % 2, sticky="nsew", padx=6, pady=6)
+            grid.columnconfigure(i % 2, weight=1)
+            self.lab(c, t(g), bold=True).pack(anchor="w", pady=(0, 6))
+            for it in items:
+                v = tk.BooleanVar(value=it["default"])
+                self.checks[it["id"]] = (v, it)
+                self.chk(c, t(it["key"]), v).pack(fill="x")
+        bar = tk.Frame(b, bg=BG)
+        bar.pack(fill="x", pady=8)
+        Btn(bar, "Terapkan", self.do_apply, self).pack(side="left")
+        Btn(bar, "Kembalikan (Undo)", self.do_undo, self, False).pack(side="left", padx=8)
+        self.logbox = tk.Text(b, height=5, bg=CARD, fg=DIM, bd=0, font=("Consolas", 9))
+        self.logbox.pack(fill="x")
+
+    def log(self, s):
+        self.q.put(s)
+
+    def do_apply(self):
+        sel = [it for v, it in self.checks.values() if v.get()]
+        for it in sel:
+            if it.get("warn") and not messagebox.askyesno("Peringatan", t(it["warn"])):
+                return
+        threading.Thread(target=apply_tweaks, args=(sel, True, self.log), daemon=True).start()
+
+    def do_undo(self):
+        threading.Thread(target=undo_all, args=(self.log,), daemon=True).start()
+
+    def p_power(self, b):
+        c = self.card(b)
+        c.pack(fill="x", pady=(0, 10))
+        self.lab(c, "CPU Power (lewat power plan Windows, aman & bisa diubah lagi)",
+                 bold=True).pack(anchor="w")
+        self.cmin, self.cmax, self.boost = tk.IntVar(value=5), tk.IntVar(value=100), tk.BooleanVar(value=True)
+        for txt, var in (("Min CPU %", self.cmin), ("Max CPU %", self.cmax)):
+            r = tk.Frame(c, bg=CARD)
+            r.pack(fill="x", pady=2)
+            self.lab(r, txt, width=10, anchor="w").pack(side="left")
+            self.scale(r, var, from_=5, to=100, orient="horizontal", length=380).pack(side="left")
+        self.chk(c, "Turbo Boost CPU aktif", self.boost).pack(anchor="w")
+        r = tk.Frame(c, bg=CARD)
+        r.pack(anchor="w", pady=8)
+        for n, a in {"Hemat": (5, 60, False), "Seimbang": (5, 100, True),
+                     "Performa": (60, 100, True), "Max": (100, 100, True)}.items():
+            Btn(r, n, lambda a=a: (self.cmin.set(a[0]), self.cmax.set(a[1]), self.boost.set(a[2])),
+                self, False).pack(side="left", padx=3)
+        Btn(c, "Terapkan CPU", self.apply_cpu, self).pack(anchor="w")
+        g = self.card(b)
+        g.pack(fill="x")
+        self.lab(g, f"GPU: {self.stats.gpu_name}", bold=True).pack(anchor="w")
+        self.lab(g, "Klok/voltase/fan GPU AMD diatur lewat AMD Software (Adrenalin) - hanya GPU AMD. "
+                    "PCIe Max Performa bisa dipakai di semua GPU.", dim=True,
+                 wraplength=700).pack(anchor="w", pady=6)
+        r = tk.Frame(g, bg=CARD)
+        r.pack(anchor="w")
+        Btn(r, "PCIe Max Performa", self.pcie, self, False).pack(side="left")
+        Btn(r, "Buka AMD Software", self.open_amd, self).pack(side="left", padx=8)
+
+    def apply_cpu(self):
+        lo, hi, bo = min(self.cmin.get(), self.cmax.get()), self.cmax.get(), self.boost.get()
+        def job():
+            for k, v in (("PROCTHROTTLEMIN", lo), ("PROCTHROTTLEMAX", hi),
+                         ("PERFBOOSTMODE", 2 if bo else 0)):
+                for m in ("/setacvalueindex", "/setdcvalueindex"):
+                    run(["powercfg", m, "SCHEME_CURRENT", "SUB_PROCESSOR", k, str(v)])
+            run(["powercfg", "/setactive", "SCHEME_CURRENT"])
+        threading.Thread(target=job, daemon=True).start()
+        messagebox.showinfo("WinTweaks", f"CPU power diterapkan: min {lo}% / max {hi}%")
+
+    def pcie(self):
+        for m in ("/setacvalueindex", "/setdcvalueindex"):
+            run(["powercfg", m, "SCHEME_CURRENT", "SUB_PCIEXPRESS", "ASPM", "0"])
+        run(["powercfg", "/setactive", "SCHEME_CURRENT"])
+        messagebox.showinfo("WinTweaks", "PCIe Link State Power Management dimatikan.")
+
+    def open_amd(self):
+        if not self.stats.amd:
+            return messagebox.showinfo("WinTweaks", "GPU AMD tidak terdeteksi. Fitur ini hanya untuk AMD.")
+        p = r"C:\Program Files\AMD\CNext\CNext\RadeonSoftware.exe"
+        if os.path.exists(p):
+            subprocess.Popen([p])
+        else:
+            messagebox.showinfo("WinTweaks", "AMD Software belum terpasang.")
+
+    def p_audio(self, b):
+        c = self.card(b)
+        c.pack(fill="x")
+        self.lab(c, "FX Sound Engine - EQ bawaan app, tanpa Equalizer APO", bold=True).pack(anchor="w")
+        self.lab(c, "Menangkap suara sistem lalu mengolahnya. Pilih output (headset / speaker lain) "
+                    "yang BEDA dari output default Windows supaya suara tidak dobel.",
+                 dim=True, wraplength=700).pack(anchor="w", pady=(2, 8))
+        outs = self.fx.outputs() or ["(tidak ada)"]
+        self.outv = tk.StringVar(value=outs[0])
+        self.menu(c, self.outv, *outs).pack(anchor="w")
+        pr = tk.Frame(c, bg=CARD)
+        pr.pack(anchor="w", pady=8)
+        self.sliders = []
+        for n, g in PRESETS.items():
+            Btn(pr, n, lambda g=g: [s.set(v) for s, v in zip(self.sliders, g)], self, False).pack(
+                side="left", padx=3)
+        sl = tk.Frame(c, bg=CARD)
+        sl.pack(pady=6)
+        for i, f in enumerate(BANDS):
+            col = tk.Frame(sl, bg=CARD)
+            col.pack(side="left", padx=7)
+            s = self.scale(col, from_=12, to=-12, orient="vertical", length=140, width=14,
+                           command=lambda v, i=i: self.fx.gains.__setitem__(i, float(v)))
+            s.set(self.fx.gains[i])
+            s.pack()
+            self.sliders.append(s)
+            self.lab(col, f"{f // 1000}k" if f >= 1000 else str(f), dim=True, size=8).pack()
+        self.fx_btn = Btn(c, "Matikan FX" if self.fx.run_ else "Nyalakan FX", self.toggle_fx, self)
+        self.fx_btn.pack(anchor="w", pady=6)
+        self.fx_msg = self.lab(c, "", dim=True)
+        self.fx_msg.pack(anchor="w")
+
+    def toggle_fx(self):
+        if self.fx.run_:
+            self.fx.stop()
+            self.fx_btn.config(text="Nyalakan FX")
+        else:
+            self.fx.err = ""
+            self.fx.start(self.outv.get())
+            self.fx_btn.config(text="Matikan FX")
+
+    # ---- rekam
+    def ffmpeg(self):
+        p = shutil.which("ffmpeg") or os.path.join(FF_DIR, "ffmpeg.exe")
+        return p if os.path.exists(p) else None
+
+    def get_ffmpeg(self):  # ffmpeg otomatis diunduh sekali, tanpa setup manual
+        if self.ffmpeg():
+            return self.ffmpeg()
+        self.log("Mengunduh ffmpeg otomatis (sekali saja)...")
+        os.makedirs(FF_DIR, exist_ok=True)
+        zp = os.path.join(FF_DIR, "ff.zip")
+        urllib.request.urlretrieve(FF_URL, zp)
+        with zipfile.ZipFile(zp) as z:
+            for n in z.namelist():
+                if n.endswith("bin/ffmpeg.exe"):
+                    with z.open(n) as s, open(os.path.join(FF_DIR, "ffmpeg.exe"), "wb") as d:
+                        shutil.copyfileobj(s, d)
+        os.remove(zp)
+        return self.ffmpeg()
+
+    def p_rec(self, b):
+        c = self.card(b)
+        c.pack(fill="x")
+        w, h = get_current_resolution()
+        self.res, self.fpsv = tk.StringVar(value=f"{w}x{h}"), tk.StringVar(value="30")
+        r = tk.Frame(c, bg=CARD)
+        r.pack(anchor="w")
+        self.lab(r, "Resolusi").pack(side="left")
+        self.menu(r, self.res, *dict.fromkeys([f"{w}x{h}", "1920x1080", "1600x900",
+                                                "1280x720", "854x480"])).pack(side="left", padx=8)
+        self.lab(r, "FPS").pack(side="left")
+        self.menu(r, self.fpsv, "24", "30", "60").pack(side="left", padx=8)
+        self.lab(c, "Encoder otomatis: AMD AMF (ringan untuk CPU) kalau GPU AMD, selain itu x264. "
+                    "Hasil di Pictures\\WinTweaks.", dim=True, wraplength=700).pack(anchor="w", pady=8)
+        r = tk.Frame(c, bg=CARD)
+        r.pack(anchor="w")
+        self.rec_btn = Btn(r, "■ Stop Rekam" if self.rec else "● Mulai Rekam", self.toggle_rec, self)
+        self.rec_btn.pack(side="left")
+        Btn(r, "Screenshot", self.shot, self, False).pack(side="left", padx=8)
+        Btn(r, "Buka folder", lambda: (os.makedirs(PICS, exist_ok=True), os.startfile(PICS)),
+            self, False).pack(side="left")
+        self.rec_msg = self.lab(c, "", dim=True)
+        self.rec_msg.pack(anchor="w", pady=8)
+
+    def shot(self):
+        os.makedirs(PICS, exist_ok=True)
+        f = os.path.join(PICS, time.strftime("screenshot_%Y%m%d_%H%M%S.png"))
+        ImageGrab.grab(all_screens=True).save(f)
+        self.rec_msg.config(text=f"Tersimpan: {f}")
+
+    def toggle_rec(self):
+        if self.rec:
+            self.stop_rec()
+            return self.rec_btn.config(text="● Mulai Rekam")
+        self.rec_btn.config(text="■ Stop Rekam")
+        def job():
+            try:
+                ff = self.get_ffmpeg()
+                os.makedirs(PICS, exist_ok=True)
+                out = os.path.join(PICS, time.strftime("rekam_%Y%m%d_%H%M%S.mp4"))
+                W, H = self.res.get().split("x")
+                enc = (["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "24", "-qp_p", "26"]
+                       if self.stats.amd else ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"])
+                self.rec = subprocess.Popen(
+                    [ff, "-y", "-f", "gdigrab", "-framerate", self.fpsv.get(), "-i", "desktop",
+                     "-vf", f"scale={W}:{H}", *enc, "-pix_fmt", "yuv420p", out],
+                    stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                self.log(f"Merekam -> {out}")
+            except Exception as e:
+                self.log(f"Rekam gagal: {e}")
+        threading.Thread(target=job, daemon=True).start()
+
+    def stop_rec(self):
+        if self.rec:
+            try:
+                self.rec.stdin.write(b"q")
+                self.rec.stdin.flush()
+                self.rec.wait(8)
+            except Exception:
+                self.rec.kill()
+            self.rec = None
+            self.log("Rekaman selesai & tersimpan.")
+
+    # ---- overlay
+    def p_over(self, b):
+        c = self.card(b)
+        c.pack(fill="x")
+        self.lab(c, "Cincin animasi CPU / GPU / RAM + FPS di atas layar game. Seret untuk "
+                    "pindah posisi. Jalan di game windowed / borderless.", dim=True,
+                 wraplength=700).pack(anchor="w", pady=(0, 10))
+        self.ov_btn = Btn(c, "Matikan Overlay" if self.ov else "Nyalakan Overlay", self.toggle_ov, self)
+        self.ov_btn.pack(anchor="w")
+        self.lab(c, "FPS: taruh PresentMon.exe (gratis, Intel/GitHub) di folder yang sama dengan "
+                    "WinTweaks.exe lalu buka ulang. Tanpa itu FPS tampil '--'.", dim=True,
+                 wraplength=700).pack(anchor="w", pady=10)
+
+    def toggle_ov(self):
+        if self.ov:
+            self.ov.destroy()
+            self.ov = None
+            return self.ov_btn.config(text="Nyalakan Overlay")
+        o = tk.Toplevel(self.root)
+        o.overrideredirect(True)
+        o.attributes("-topmost", True)
+        o.config(bg="#010101")
+        o.attributes("-transparentcolor", "#010101")
+        o.geometry("+30+30")
+        for lbl, fn in (("CPU", lambda: self.stats.cpu), ("GPU", lambda: self.stats.gpu),
+                        ("RAM", lambda: self.stats.ram)):
+            Ring(o, lbl, 96, self.acc, fn, bg="#010101").pack(side="left")
+        fps = tk.Label(o, bg="#010101", fg=self.acc[0], font=(FONT, 24, "bold"))
+        fps.pack(side="left", padx=8)
+        def upd():
+            if self.ov is o:
+                fps.config(text=f"{self.stats.fps} FPS" if self.stats.fps else "-- FPS")
+                o.after(500, upd)
+        d = {}
+        o.bind("<Button-1>", lambda e: d.update(x=e.x, y=e.y))
+        o.bind("<B1-Motion>", lambda e: o.geometry(
+            f"+{o.winfo_x() + e.x - d['x']}+{o.winfo_y() + e.y - d['y']}"))
+        self.ov = o
+        upd()
+        self.ov_btn.config(text="Matikan Overlay")
+
+    def p_theme(self, b):
+        for n, (a1, a2) in THEMES.items():
+            c = self.card(b)
+            c.pack(fill="x", pady=5)
+            for i in range(12):
+                tk.Frame(c, bg=mix(a1, a2, i / 11), width=22, height=22).pack(side="left")
+            self.lab(c, n, bold=True).pack(side="left", padx=14)
+            Btn(c, "Pakai", lambda n=n: self.set_theme(n), self, n == self.theme).pack(side="right")
+
+    def set_theme(self, n):
+        self.theme = n
+        self.build()
+
+    def poll(self):
+        try:
+            while True:
+                m = self.q.get_nowait()
+                if self.logbox:
+                    self.logbox.insert("end", m + "\n")
+                    self.logbox.see("end")
+                elif self.cur_page.startswith("Rekam"):
+                    self.rec_msg.config(text=m)
+        except (queue.Empty, tk.TclError):
+            pass
+        try:
+            if self.cur_page == "Dashboard":
+                self.gpu_lbl.config(text=f"GPU: {self.stats.gpu_name}")
+            elif self.cur_page == "Audio FX" and self.fx.err:
+                self.fx_msg.config(text=self.fx.err)
+        except tk.TclError:
+            pass
+        self.root.after(200, self.poll)
 
 
 def ensure_admin():
     if ctypes.windll.shell32.IsUserAnAdmin():
         return True
     args = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
-    params = " ".join(f'"{a}"' for a in args)
-    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params,
-                                        None, 1)
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable,
+                                        " ".join(f'"{a}"' for a in args), None, 1)
     return False
 
 
