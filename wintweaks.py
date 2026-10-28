@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """WinTweaks CPU GPU Universal - tweak, power, record, overlay."""
-import ctypes, glob, math, os, queue, shutil, subprocess, sys, threading
+import ctypes, ctypes.wintypes, glob, json, math, re, os, queue, shutil, subprocess, sys, threading
 import time, urllib.request, zipfile
 import tkinter as tk
 from tkinter import messagebox
@@ -18,6 +18,7 @@ BG, SIDE, CARD, CARD2, FG, DIM = "#09090a", "#0e0e10", "#151518", "#202026", "#f
 FONT = "Segoe UI"
 PICS = os.path.join(os.path.expanduser("~"), "Pictures", "WinTweaks")
 FF_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "WinTweaks", "ffmpeg")
+PM_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "WinTweaks", "presentmon")
 FF_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 def mix(c1, c2, f):
     a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
@@ -33,7 +34,8 @@ class Stats:
         self.gpu_name = "Mendeteksi..."
         self.amd = False
         self.on = True
-        for fn in (self._gpu_info, self._loop, self._gpu_loop, self._fps_loop):
+        self.fps_t, self.fps_started, self.fps_msg = 0, False, ""
+        for fn in (self._gpu_info, self._loop, self._gpu_loop):
             threading.Thread(target=fn, daemon=True).start()
 
     def _gpu_info(self):
@@ -59,24 +61,74 @@ class Stats:
                 pass
             time.sleep(0.5)
 
-    def _fps_loop(self):  # FPS butuh PresentMon.exe di folder app (opsional)
-        pm = (glob.glob(os.path.join(EXE_DIR, "PresentMon*.exe")) +
-              glob.glob(os.path.join(BASE_DIR, "PresentMon*.exe")))
+    def fps_now(self):
+        return self.fps if self.fps and time.time() - self.fps_t < 3 else None
+
+    def start_fps(self):
+        if not self.fps_started:
+            self.fps_started = True
+            threading.Thread(target=self._fps_loop, daemon=True).start()
+
+    def _pm_path(self):
+        f = glob.glob(os.path.join(EXE_DIR, "PresentMon*.exe")) + glob.glob(
+            os.path.join(PM_DIR, "PresentMon*.exe"))
+        return f[0] if f else None
+
+    def _pm_download(self):  # PresentMon diunduh otomatis sekali
+        os.makedirs(PM_DIR, exist_ok=True)
+        urls = []
+        try:
+            rq = urllib.request.Request(
+                "https://api.github.com/repos/GameTechDev/PresentMon/releases/latest",
+                headers={"User-Agent": "WinTweaks"})
+            for a in json.load(urllib.request.urlopen(rq, timeout=20))["assets"]:
+                if re.search(r"PresentMon.*x64\.exe$", a["name"], re.I):
+                    urls.append(a["browser_download_url"])
+        except Exception:
+            pass
+        urls.append("https://github.com/GameTechDev/PresentMon/releases/download/"
+                    "v1.10.0/PresentMon-1.10.0-x64.exe")
+        dst = os.path.join(PM_DIR, "PresentMon.exe")
+        for u in urls:
+            try:
+                urllib.request.urlretrieve(u, dst)
+                return dst
+            except Exception:
+                continue
+        raise RuntimeError("unduh PresentMon gagal (cek internet)")
+
+    def _fps_loop(self):
+        self.fps_msg = "Menyiapkan FPS (unduh PresentMon sekali)..."
+        pm = self._pm_path()
         if not pm:
-            return
+            try:
+                pm = self._pm_download()
+            except Exception as e:
+                self.fps_msg = f"FPS gagal: {e}"
+                return
         hdr = []
-        for flag in ("--output_stdout", "-output_stdout"):
-            p = subprocess.Popen([pm[0], flag, "--stop_existing_session"],
-                                 stdout=subprocess.PIPE, text=True,
-                                 creationflags=NO_WINDOW, errors="ignore")
-            hdr = (p.stdout.readline() or "").strip().lower().split(",")
-            if "processname" in hdr or "application" in hdr:
+        for args in (["--output_stdout", "--stop_existing_session"],
+                     ["-output_stdout", "-stop_existing_session"]):
+            p = subprocess.Popen([pm, *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 text=True, creationflags=NO_WINDOW, errors="ignore")
+            for _ in range(8):
+                ln = (p.stdout.readline() or "").strip().lower().split(",")
+                if len(ln) > 5 and ("processname" in ln or "application" in ln):
+                    hdr = ln
+                    break
+            if hdr:
                 break
+            p.kill()
+        if not hdr:
+            self.fps_msg = "FPS gagal: PresentMon tidak mau jalan."
+            return
         try:
             ip = hdr.index("processname") if "processname" in hdr else hdr.index("application")
-            im = hdr.index("msbetweenpresents")
-        except ValueError:
+            im = next(hdr.index(k) for k in ("msbetweenpresents", "frametime") if k in hdr)
+        except (ValueError, StopIteration):
+            self.fps_msg = "FPS gagal: format PresentMon tidak dikenal."
             return
+        self.fps_msg = ""
         win, last = {}, time.time()
         for line in p.stdout:
             c = line.strip().split(",")
@@ -87,7 +139,8 @@ class Stats:
                 continue
             if time.time() - last >= 1:
                 best = max(win.values(), key=len, default=[])
-                self.fps = round(1000 / (sum(best) / len(best))) if best else None
+                if len(best) >= 5 and sum(best) > 0:
+                    self.fps, self.fps_t = round(1000 * len(best) / sum(best)), time.time()
                 win, last = {}, time.time()
 
 
@@ -195,15 +248,18 @@ class App:
         self.theme, self.cur_page = "Radeon Red", "Dashboard"
         self.acc = THEMES[self.theme]
         self.stats, _, self.q = Stats(), None, queue.Queue()
-        self.rec = self.ov = self.logbox = None
+        self.rec = self.ov = self.logbox = self.rec_btn = None
+        self.rec_busy, self.rec_t0, self.toast = False, 0, ("", 0)
+        self.res_val, self.fps_val = get_current_resolution(), "30"
         self.checks = {}
         self.build()
+        self.hotkeys()
         self.root.after(100, self.poll)
 
     def run(self):
         self.root.mainloop()
         self.stats.on = False
-        self.stop_rec()
+        self.stop_rec(wait=True)
 
     def build(self):
         for w in self.root.winfo_children():
@@ -425,6 +481,8 @@ class App:
         c.pack(fill="x")
         w, h = get_current_resolution()
         self.res, self.fpsv = tk.StringVar(value=f"{w}x{h}"), tk.StringVar(value="30")
+        self.res.trace_add("write", lambda *a: setattr(self, "res_val", tuple(self.res.get().split("x"))))
+        self.fpsv.trace_add("write", lambda *a: setattr(self, "fps_val", self.fpsv.get()))
         r = tk.Frame(c, bg=CARD)
         r.pack(anchor="w")
         self.lab(r, "Resolusi").pack(side="left")
@@ -444,56 +502,114 @@ class App:
         self.rec_msg = self.lab(c, "", dim=True)
         self.rec_msg.pack(anchor="w", pady=8)
 
+    def notify(self, msg):
+        self.toast = (msg, time.time() + 2.5)
+
     def shot(self):
         os.makedirs(PICS, exist_ok=True)
         f = os.path.join(PICS, time.strftime("screenshot_%Y%m%d_%H%M%S.png"))
         ImageGrab.grab(all_screens=True).save(f)
-        self.rec_msg.config(text=f"Tersimpan: {f}")
+        self.notify("Screenshot tersimpan ✓")
+        self.log(f"Screenshot: {f}")
 
     def toggle_rec(self):
         if self.rec:
-            self.stop_rec()
-            return self.rec_btn.config(text="● Mulai Rekam")
-        self.rec_btn.config(text="■ Stop Rekam")
+            return self.stop_rec()
+        if self.rec_busy:
+            return
+        self.rec_busy = True
+        self.notify("Mulai merekam...")
         def job():
             try:
                 ff = self.get_ffmpeg()
                 os.makedirs(PICS, exist_ok=True)
                 out = os.path.join(PICS, time.strftime("rekam_%Y%m%d_%H%M%S.mp4"))
-                W, H = self.res.get().split("x")
-                enc = (["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "24", "-qp_p", "26"]
-                       if self.stats.amd else ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"])
-                self.rec = subprocess.Popen(
-                    [ff, "-y", "-f", "gdigrab", "-framerate", self.fpsv.get(), "-i", "desktop",
-                     "-vf", f"scale={W}:{H}", *enc, "-pix_fmt", "yuv420p", out],
-                    stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
-                self.log(f"Merekam -> {out}")
+                W, H = self.res_val
+                x264 = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"]
+                amf = ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "24", "-qp_p", "26"]
+                for enc in ([amf, x264] if self.stats.amd else [x264]):
+                    p = subprocess.Popen(
+                        [ff, "-y", "-f", "gdigrab", "-framerate", self.fps_val, "-i", "desktop",
+                         "-vf", f"scale={W}:{H}", *enc, "-pix_fmt", "yuv420p", out],
+                        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                    time.sleep(1.5)
+                    if p.poll() is None:  # jalan; kalau AMF gagal otomatis coba x264
+                        self.rec, self.rec_t0 = p, time.time()
+                        self.log(f"Merekam -> {out}")
+                        return
+                self.notify("Rekam gagal")
+                self.log("Rekam gagal: ffmpeg berhenti.")
             except Exception as e:
+                self.notify("Rekam gagal")
                 self.log(f"Rekam gagal: {e}")
+            finally:
+                self.rec_busy = False
         threading.Thread(target=job, daemon=True).start()
 
-    def stop_rec(self):
-        if self.rec:
+    def stop_rec(self, wait=False):
+        r, self.rec = self.rec, None
+        if not r:
+            return
+        def fin():
             try:
-                self.rec.stdin.write(b"q")
-                self.rec.stdin.flush()
-                self.rec.wait(8)
+                r.stdin.write(b"q")
+                r.stdin.flush()
+                r.wait(10)
             except Exception:
-                self.rec.kill()
-            self.rec = None
+                r.kill()
             self.log("Rekaman selesai & tersimpan.")
+            self.notify("Rekaman tersimpan ✓")
+        fin() if wait else threading.Thread(target=fin, daemon=True).start()
+
+    def hotkeys(self):  # F9 = rekam, F10 = screenshot (jalan juga saat main game)
+        def loop():
+            u = ctypes.windll.user32
+            u.RegisterHotKey(None, 1, 0, 0x78)
+            u.RegisterHotKey(None, 2, 0, 0x79)
+            msg = ctypes.wintypes.MSG()
+            while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == 0x0312:
+                    self.q.put(f"__hk{msg.wParam}")
+        threading.Thread(target=loop, daemon=True).start()
+
+    def refresh_ui(self):
+        if self.rec and self.rec.poll() is not None:
+            self.rec = None
+            self.notify("Rekaman berhenti")
+        rec_on = bool(self.rec)
+        try:
+            if self.rec_btn is not None and self.rec_btn.winfo_exists():
+                self.rec_btn.config(text="■ Stop Rekam" if rec_on else "● Mulai Rekam")
+        except Exception:
+            pass
+        if self.ov:
+            try:
+                if rec_on:
+                    el = int(time.time() - self.rec_t0)
+                    blink = int(time.time() * 2) % 2
+                    self.ov_rec.config(text=f"■ REC {el // 60:02d}:{el % 60:02d}  F9",
+                                       bg="#e01b24" if blink else "#8a1016")
+                else:
+                    self.ov_rec.config(text="● REC  F9", bg="#26262c")
+                f = self.stats.fps_now()
+                self.ov_fps.config(text=f"{f} FPS" if f else "-- FPS")
+                msg, until = self.toast
+                self.ov_toast.config(text=msg if time.time() < until else
+                                     (self.stats.fps_msg if not f else ""))
+            except tk.TclError:
+                pass
 
     # ---- overlay
     def p_over(self, b):
         c = self.card(b)
         c.pack(fill="x")
-        self.lab(c, "Cincin animasi CPU / GPU / RAM + FPS di atas layar game. Seret untuk "
-                    "pindah posisi. Jalan di game windowed / borderless.", dim=True,
+        self.lab(c, "Cincin animasi CPU / GPU / RAM + FPS + tombol Rekam & Screenshot di layar. "
+                    "Hotkey global: F9 = rekam on/off, F10 = screenshot. Seret untuk pindah. "
+                    "Jalan di game windowed / borderless.", dim=True,
                  wraplength=700).pack(anchor="w", pady=(0, 10))
         self.ov_btn = Btn(c, "Matikan Overlay" if self.ov else "Nyalakan Overlay", self.toggle_ov, self)
         self.ov_btn.pack(anchor="w")
-        self.lab(c, "FPS: taruh PresentMon.exe (gratis, Intel/GitHub) di folder yang sama dengan "
-                    "WinTweaks.exe lalu buka ulang. Tanpa itu FPS tampil '--'.", dim=True,
+        self.lab(c, "FPS otomatis: PresentMon diunduh sekali saat overlay pertama dinyalakan (butuh internet). FPS muncul setelah game berjalan.", dim=True,
                  wraplength=700).pack(anchor="w", pady=10)
 
     def toggle_ov(self):
@@ -501,27 +617,38 @@ class App:
             self.ov.destroy()
             self.ov = None
             return self.ov_btn.config(text="Nyalakan Overlay")
+        self.stats.start_fps()
         o = tk.Toplevel(self.root)
         o.overrideredirect(True)
         o.attributes("-topmost", True)
         o.config(bg="#010101")
         o.attributes("-transparentcolor", "#010101")
         o.geometry("+30+30")
+        top = tk.Frame(o, bg="#010101")
+        top.pack(anchor="w")
         for lbl, fn in (("CPU", lambda: self.stats.cpu), ("GPU", lambda: self.stats.gpu),
                         ("RAM", lambda: self.stats.ram)):
-            Ring(o, lbl, 96, self.acc, fn, bg="#010101").pack(side="left")
-        fps = tk.Label(o, bg="#010101", fg=self.acc[0], font=(FONT, 24, "bold"))
-        fps.pack(side="left", padx=8)
-        def upd():
-            if self.ov is o:
-                fps.config(text=f"{self.stats.fps} FPS" if self.stats.fps else "-- FPS")
-                o.after(500, upd)
+            Ring(top, lbl, 96, self.acc, fn, bg="#010101").pack(side="left")
+        self.ov_fps = tk.Label(top, bg="#010101", fg=self.acc[0], font=(FONT, 24, "bold"),
+                               text="-- FPS")
+        self.ov_fps.pack(side="left", padx=8)
+        bar = tk.Frame(o, bg="#010101")
+        bar.pack(anchor="w", pady=(2, 0))
+        def pill(text, cmd):
+            l = tk.Label(bar, text=text, bg="#26262c", fg=FG, font=(FONT, 10, "bold"),
+                         padx=12, pady=5, cursor="hand2")
+            l.pack(side="left", padx=(0, 6))
+            l.bind("<Button-1>", lambda e: cmd())
+            return l
+        self.ov_rec = pill("● REC  F9", self.toggle_rec)
+        pill("SHOT  F10", self.shot)
+        self.ov_toast = tk.Label(o, bg="#010101", fg=FG, font=(FONT, 9, "bold"), anchor="w")
+        self.ov_toast.pack(anchor="w", pady=(3, 0))
         d = {}
-        o.bind("<Button-1>", lambda e: d.update(x=e.x, y=e.y))
-        o.bind("<B1-Motion>", lambda e: o.geometry(
-            f"+{o.winfo_x() + e.x - d['x']}+{o.winfo_y() + e.y - d['y']}"))
+        for w in (o, top):
+            w.bind("<Button-1>", lambda e: d.update(x=e.x_root - o.winfo_x(), y=e.y_root - o.winfo_y()))
+            w.bind("<B1-Motion>", lambda e: o.geometry(f"+{e.x_root - d['x']}+{e.y_root - d['y']}"))
         self.ov = o
-        upd()
         self.ov_btn.config(text="Matikan Overlay")
 
     def p_theme(self, b):
@@ -541,13 +668,18 @@ class App:
         try:
             while True:
                 m = self.q.get_nowait()
-                if self.logbox:
+                if m == "__hk1":
+                    self.toggle_rec()
+                elif m == "__hk2":
+                    self.shot()
+                elif self.logbox:
                     self.logbox.insert("end", m + "\n")
                     self.logbox.see("end")
                 elif self.cur_page.startswith("Rekam"):
                     self.rec_msg.config(text=m)
         except (queue.Empty, tk.TclError):
             pass
+        self.refresh_ui()
         try:
             if self.cur_page == "Dashboard":
                 self.gpu_lbl.config(text=f"GPU: {self.stats.gpu_name}")
