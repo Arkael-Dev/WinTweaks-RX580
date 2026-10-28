@@ -12,9 +12,9 @@ import core
 from core import (run, run_ps, t, TWEAKS, apply_tweaks, undo_all,
                   get_current_resolution, EXE_DIR, BASE_DIR, NO_WINDOW)
 
-THEMES = {"Radeon Red": ("#ff2d3a", "#ff8a3d"), "Cyber Cyan": ("#19e6ff", "#7b5cff"),
+THEMES = {"Radeon Red": ("#ed1c24", "#ff5a1f"), "Cyber Cyan": ("#19e6ff", "#7b5cff"),
           "Neon Purple": ("#b45cff", "#ff4fd8"), "Matrix Green": ("#2dff8a", "#d4ff3d")}
-BG, SIDE, CARD, CARD2, FG, DIM = "#0b0c10", "#101218", "#171a22", "#1f232d", "#f1f3f8", "#8b92a5"
+BG, SIDE, CARD, CARD2, FG, DIM = "#09090a", "#0e0e10", "#151518", "#202026", "#f4f4f6", "#8d8d96"
 FONT = "Segoe UI"
 PICS = os.path.join(os.path.expanduser("~"), "Pictures", "WinTweaks")
 FF_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "WinTweaks", "ffmpeg")
@@ -124,6 +124,39 @@ class Ring(tk.Canvas):
         self.after(33, self._tick)
 
 
+class Banner(tk.Canvas):
+    """Header gaya AMD Radeon: panel gelap, potongan miring merah, kilau bergerak."""
+    def __init__(self, master, acc):
+        super().__init__(master, height=110, bg=CARD, highlightthickness=0)
+        self.acc, self.x = acc, -200
+        self.bind("<Configure>", lambda e: None)
+        self._tick()
+
+    def _tick(self):
+        try:
+            w = max(self.winfo_width(), 700)
+            self.delete("all")
+            self.create_polygon(0, 0, w * .62, 0, w * .62 - 70, 110, 0, 110,
+                                fill=mix(CARD, self.acc[0], .16), outline="")
+            self.create_polygon(w * .62 + 6, 0, w * .62 + 26, 0, w * .62 - 44, 110,
+                                w * .62 - 64, 110, fill=self.acc[0], outline="")
+            self.create_polygon(w * .62 + 34, 0, w * .62 + 40, 0, w * .62 - 30, 110,
+                                w * .62 - 36, 110, fill=self.acc[1], outline="")
+            sx = self.x
+            self.create_polygon(sx, 0, sx + 50, 0, sx - 20, 110, sx - 70, 110,
+                                fill=mix(CARD, "#ffffff", .07), outline="")
+            self.x = sx + 9 if sx < w + 100 else -200
+            self.create_text(28, 38, anchor="w", text="ARKAEL WIN TWEAKS", fill=FG,
+                             font=(FONT, 26, "bold"))
+            self.create_text(30, 76, anchor="w", text="CPU  ·  GPU   INTEL  &  AMD",
+                             fill=self.acc[0], font=(FONT, 12, "bold"))
+            self.create_text(w - 20, 92, anchor="e", text="RADEON STYLE", fill=DIM,
+                             font=(FONT, 8, "bold"))
+        except tk.TclError:
+            return
+        self.after(40, self._tick)
+
+
 class Btn(tk.Label):
     def __init__(self, master, text, cmd, app, primary=True):
         super().__init__(master, text=text, font=(FONT, 10, "bold"), cursor="hand2",
@@ -152,7 +185,7 @@ class Btn(tk.Label):
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("WinTweaks CPU GPU Universal")
+        self.root.title("Arkael Win Tweaks")
         self.root.geometry("1040x680")
         self.root.minsize(960, 620)
         self.root.configure(bg=BG)
@@ -179,9 +212,9 @@ class App:
         side = tk.Frame(self.root, bg=SIDE, width=210)
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
-        tk.Label(side, text="WinTweaks", bg=SIDE, fg=FG, font=(FONT, 20, "bold")).pack(
+        tk.Label(side, text="ARKAEL", bg=SIDE, fg=FG, font=(FONT, 20, "bold")).pack(
             anchor="w", padx=22, pady=(24, 0))
-        tk.Label(side, text="CPU · GPU · Universal", bg=SIDE, fg=self.acc[0],
+        tk.Label(side, text="WIN TWEAKS", bg=SIDE, fg=self.acc[0],
                  font=(FONT, 9, "bold")).pack(anchor="w", padx=22, pady=(0, 22))
         self.main = tk.Frame(self.root, bg=BG)
         self.main.pack(side="left", fill="both", expand=True)
@@ -234,7 +267,10 @@ class App:
             pass
 
     def card(self, p):
-        return tk.Frame(p, bg=CARD, padx=18, pady=16)
+        f = tk.Frame(p, bg=CARD, padx=18, pady=14, highlightthickness=1,
+                     highlightbackground="#26262c")
+        tk.Frame(f, bg=self.acc[0], height=2).pack(fill="x", pady=(0, 10))
+        return f
 
     def lab(self, p, text, dim=False, size=10, bold=False, **kw):
         return tk.Label(p, text=text, bg=p["bg"], fg=DIM if dim else FG, justify="left",
@@ -256,6 +292,7 @@ class App:
 
     # ---- pages
     def p_dash(self, b):
+        Banner(b, self.acc).pack(fill="x", pady=(0, 12))
         c = self.card(b)
         c.pack(fill="x")
         row = tk.Frame(c, bg=CARD)
