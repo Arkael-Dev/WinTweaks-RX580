@@ -1065,8 +1065,8 @@ class App:
                 os.makedirs(PICS, exist_ok=True)
                 out = os.path.join(PICS, time.strftime("rekam_%Y%m%d_%H%M%S.mp4"))
                 W, H = self.res_val
-                x264 = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"]
-                amf = ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "24", "-qp_p", "26"]
+                x264 = ["-f", "dshow", "-i", "audio=virtual-audio-capturer", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", "-b:a", "192k"]
+                amf = ["-f", "dshow", "-i", "audio=virtual-audio-capturer", "-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "24", "-qp_p", "26", "-c:a", "aac", "-b:a", "192k"]
                 for enc in ([amf, x264] if self.stats.amd else [x264]):
                     p = subprocess.Popen(
                         [ff, "-y", "-f", "gdigrab", "-framerate", self.fps_val, "-i", "desktop",
@@ -1483,8 +1483,15 @@ class App:
             self.logbox_err(f"UI: {e}")
         try:
             if self.cur_page == "Dashboard":
-                self.gpu_lbl.config(text=f"CPU: {L(self.stats.cpu_name)}   |   "
-                                         f"GPU: {L(self.stats.gpu_name)}")
+            full_txt = f"  🔥 ARKAEL RADEON ENGINE ACTIVE  ===  CPU: {L(self.stats.cpu_name)}   |   GPU: {L(self.stats.gpu_name)}  ===  OPTIMIZED FOR PERFORMANCE  "
+            curr = getattr(self, "_anim_offset", 0)
+            curr = (curr + 1) % len(full_txt)
+            self._anim_offset = curr
+            anim_display = full_txt[curr:] + full_txt[:curr]
+            try:
+                self.gpu_lbl.config(text=anim_display)
+            except Exception:
+                pass
         except Exception:
             pass
         self.root.after(200, self.poll)  # loop ini harus selalu lanjut
