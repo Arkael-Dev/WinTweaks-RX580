@@ -7,6 +7,10 @@ semua PC. Fitur khusus GPU (Adrenalin, encoder AMF) aktif otomatis di AMD.
 - **Tweaks**: power plan, Game Mode, MMCSS, bersih-bersih (bisa di-Undo)
 - **Power CPU/GPU**: min/max CPU, Turbo Boost, PCIe, buka AMD Software
 - **Rekam & Screenshot**: pilih resolusi & FPS, ffmpeg diunduh otomatis
-- **Overlay**: cincin CPU/GPU/RAM + FPS di atas game (FPS butuh PresentMon.exe)
+- **Profil Game**: downscale resolusi + tweak + prioritas CPU per game, otomatis kembali saat game ditutup
+- **Overlay**: CPU/GPU/RAM + FPS + tombol REC/STOP, ukuran bisa diperbesar/diperkecil (FPS lewat PresentMon, otomatis)
+- **Pengaturan**: link Telegram https://t.me/arkaelkernel
+
+Dev: Arkael-Dev
 
 Build otomatis lewat GitHub Actions (push ke `main`) -> Artifacts `WinTweaks-exe`.

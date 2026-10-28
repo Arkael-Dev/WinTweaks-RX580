@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""WinTweaks - tuning untuk Intel i3 Gen 8 + AMD RX 580 (Windows 10/11).
+"""WinTweaks - tuning universal untuk CPU & GPU apa pun (Windows 10/11).
 
 Semua tweak registry/service/power-plan disimpan nilai aslinya dan bisa
 dikembalikan lewat tombol "Kembalikan (Undo)" / "Restore". Bersih-bersih
@@ -73,14 +73,14 @@ LANG = "id"  # diubah oleh App.set_lang()
 # ======================================================== bahasa / i18n
 STR = {
     "id": {
-        "subtitle": "Tuning untuk Intel i3 Gen 8 + AMD RX 580",
+        "subtitle": "Tuning universal - CPU & GPU terdeteksi otomatis",
         "detected": "Terdeteksi: {0}",
         "tab_tweaks": "Tweaks",
         "tab_clean": "Bersih-bersih",
         "tab_profiles": "Profil Game",
         "tab_audio": "Audio",
         "grp_perf": "Performa & Power Plan",
-        "grp_game": "Gaming (RX 580 / Game Mode)",
+        "grp_game": "Gaming / Game Mode",
         "grp_sys": "Sistem (bisa di-undo)",
         "grp_clean": "Bersih-bersih (tidak bisa di-undo)",
         "t_power": "Power plan Ultimate Performance",
@@ -114,7 +114,7 @@ STR = {
         "profiles_desc": "Ganti resolusi layar SELURUH sistem otomatis "
                          "saat game ini dibuka, lalu kembali ke resolusi "
                          "semula saat game ditutup. Ringankan beban GPU "
-                         "RX 580 tanpa masuk ke dalam proses game.",
+                         "tanpa masuk ke dalam proses game.",
         "profiles_name": "Nama",
         "profiles_exe": "File .exe game",
         "profiles_browse": "Pilih...",
@@ -129,6 +129,9 @@ STR = {
         "profiles_restored": "Resolusi layar dikembalikan ke semula.",
         "profiles_need_fields": "Isi nama, file exe, lebar, dan tinggi "
                                 "dengan benar.",
+        "profiles_res_fail": "Resolusi {0}x{1} tidak didukung layar, "
+                             "game dijalankan tanpa downscale.",
+        "profiles_prio": "  Prioritas CPU game: High.",
         "audio_title": "Equalizer (Equalizer APO)",
         "audio_desc": "WinTweaks tidak memproses audio sendiri - memakai "
                       "Equalizer APO (gratis, open-source, system-wide) "
@@ -176,14 +179,14 @@ STR = {
                             "Restart PC.",
     },
     "en": {
-        "subtitle": "Tuning for Intel i3 Gen 8 + AMD RX 580",
+        "subtitle": "Universal tuning - CPU & GPU auto-detected",
         "detected": "Detected: {0}",
         "tab_tweaks": "Tweaks",
         "tab_clean": "Cleanup",
         "tab_profiles": "Game Profiles",
         "tab_audio": "Audio",
         "grp_perf": "Performance & Power Plan",
-        "grp_game": "Gaming (RX 580 / Game Mode)",
+        "grp_game": "Gaming / Game Mode",
         "grp_sys": "System (undoable)",
         "grp_clean": "Cleanup (cannot be undone)",
         "t_power": "Ultimate Performance power plan",
@@ -218,7 +221,7 @@ STR = {
         "profiles_desc": "Automatically switches the WHOLE system's "
                          "resolution when this game launches, then "
                          "restores it on exit. Lightens the load on the "
-                         "RX 580 without touching the game's process.",
+                         "GPU without touching the game's process.",
         "profiles_name": "Name",
         "profiles_exe": "Game .exe file",
         "profiles_browse": "Browse...",
@@ -232,6 +235,9 @@ STR = {
         "profiles_restored": "Screen resolution restored.",
         "profiles_need_fields": "Fill in name, exe file, width and height "
                                 "correctly.",
+        "profiles_res_fail": "Resolution {0}x{1} is not supported, "
+                             "launching without downscale.",
+        "profiles_prio": "  Game CPU priority: High.",
         "audio_title": "Equalizer (Equalizer APO)",
         "audio_desc": "WinTweaks doesn't process audio itself - it drives "
                       "Equalizer APO (free, open-source, system-wide) and "
@@ -556,7 +562,7 @@ def make_restore_point(log):
     log(t("log_restore_ok") if code == 0 else t("log_restore_skip"))
 
 
-def apply_tweaks(selected, restore_point, log):
+def apply_tweaks(selected, restore_point, log, done=True):
     st = load_state()
     if restore_point:
         make_restore_point(log)
@@ -573,7 +579,8 @@ def apply_tweaks(selected, restore_point, log):
         except Exception as e:  # noqa: BLE001
             log(t("log_fail", e))
         save_state(st)
-    log(t("log_done"))
+    if done:
+        log(t("log_done"))
 
 
 def undo_all(log):
@@ -650,15 +657,49 @@ def set_resolution(width, height):
     return ctypes.windll.user32.ChangeDisplaySettingsW(ctypes.byref(dm), 0)
 
 
-def launch_with_resolution(exe_path, width, height, log):
+PROFILE_TWEAKS = ("gamemode", "gamedvr", "mmcss")
+
+
+def launch_profile(p, log):
+    """Jalankan game dari profil: downscale resolusi, tweak, prioritas CPU.
+    Semua yang sifatnya sementara (resolusi, power plan) dikembalikan saat
+    game ditutup."""
+    exe = p["exe"]
     orig = get_current_resolution()
-    set_resolution(width, height)
-    log(t("profiles_running", width, height))
+    res_changed = power_temp = False
     try:
-        proc = subprocess.Popen([exe_path], cwd=os.path.dirname(exe_path) or None)
+        w, h = int(p.get("w", 0)), int(p.get("h", 0))
+        if p.get("downscale", True) and w > 0 and h > 0 and (w, h) != orig:
+            if set_resolution(w, h) == 0:
+                res_changed = True
+                log(t("profiles_running", w, h))
+            else:
+                log(t("profiles_res_fail", w, h))
+        if p.get("tweak"):
+            sel = [it for it in TWEAKS if it["id"] in PROFILE_TWEAKS]
+            apply_tweaks(sel, False, log, done=False)
+            st = load_state()
+            if "prev" not in st["power"]:
+                power_apply(st, log)
+                save_state(st)
+                power_temp = True
+        proc = subprocess.Popen([exe], cwd=os.path.dirname(exe) or None)
+        if p.get("prio"):
+            try:
+                import psutil
+                psutil.Process(proc.pid).nice(psutil.HIGH_PRIORITY_CLASS)
+                log(t("profiles_prio"))
+            except Exception:  # noqa: BLE001
+                pass
         proc.wait()
+    except Exception as e:  # noqa: BLE001
+        log(t("log_fail", e))
     finally:
-        set_resolution(*orig)
-        log(t("profiles_restored"))
-
-
+        if res_changed:
+            set_resolution(*orig)
+            log(t("profiles_restored"))
+        if power_temp:
+            st = load_state()
+            power_undo(st, log)
+            st["power"] = {}
+            save_state(st)

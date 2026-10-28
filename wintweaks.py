@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """WinTweaks CPU GPU Universal - tweak, power, record, overlay."""
 import ctypes, ctypes.wintypes, glob, json, math, re, os, queue, shutil, subprocess, sys, threading
-import time, urllib.request, zipfile
+import time, urllib.request, webbrowser, zipfile
 import tkinter as tk
 from tkinter import messagebox
 
@@ -19,6 +19,8 @@ FONT = "Segoe UI"
 PICS = os.path.join(os.path.expanduser("~"), "Pictures", "WinTweaks")
 FF_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "WinTweaks", "ffmpeg")
 PM_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "WinTweaks", "presentmon")
+DEV_NAME = "Arkael-Dev"
+TELEGRAM = "https://t.me/arkaelkernel"
 FF_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 def mix(c1, c2, f):
     a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
@@ -32,6 +34,7 @@ class Stats:
         self.cpu = self.gpu = self.ram = 0.0
         self.fps = None
         self.gpu_name = "Mendeteksi..."
+        self.cpu_name = "Mendeteksi..."
         self.amd = False
         self.on = True
         self.fps_t, self.fps_started, self.fps_msg = 0, False, ""
@@ -39,6 +42,8 @@ class Stats:
             threading.Thread(target=fn, daemon=True).start()
 
     def _gpu_info(self):
+        _, cn = run_ps("(Get-CimInstance Win32_Processor | Select -First 1).Name")
+        self.cpu_name = " ".join(cn.split()) or "CPU"
         _, out = run_ps("(Get-CimInstance Win32_VideoController).Name -join '|'")
         names = [n for n in out.split("|") if n]
         pick = next((n for n in names if "AMD" in n or "Radeon" in n), None)
@@ -168,10 +173,10 @@ class Ring(tk.Canvas):
             r, a = s / 2 - pad, math.radians(self.ang)  # titik berputar = "hidup"
             x, y = s / 2 + r * math.cos(a), s / 2 + r * math.sin(a)
             self.create_oval(x - 3, y - 3, x + 3, y + 3, fill=FG, outline="")
-            self.create_text(s / 2, s / 2 - s * .04, text=f"{self.cur:.0f}%", fill=FG,
-                             font=(FONT, int(s * .17), "bold"))
-            self.create_text(s / 2, s / 2 + s * .17, text=self.label, fill=DIM,
-                             font=(FONT, int(s * .08)))
+            self.create_text(s / 2, s / 2 - s * .06, text=f"{self.cur:.0f}%", fill=FG,
+                             font=(FONT, max(9, int(s * .2)), "bold"))
+            self.create_text(s / 2, s / 2 + s * .19, text=self.label, fill=self.acc[0],
+                             font=(FONT, max(8, int(s * .12)), "bold"))
         except tk.TclError:
             return
         self.after(33, self._tick)
@@ -248,7 +253,8 @@ class App:
         self.theme, self.cur_page = "Radeon Red", "Dashboard"
         self.acc = THEMES[self.theme]
         self.stats, _, self.q = Stats(), None, queue.Queue()
-        self.rec = self.ov = self.logbox = self.rec_btn = None
+        self.rec = self.ov = self.logbox = self.rec_btn = self.rbar = self.msg_lbl = None
+        self.ov_scale, self.ov_mode, self.ov_txt = 1.0, "Cincin", None
         self.rec_busy, self.rec_t0, self.toast = False, 0, ("", 0)
         self.res_val, self.fps_val = get_current_resolution(), "30"
         self.checks = {}
@@ -264,6 +270,7 @@ class App:
     def build(self):
         for w in self.root.winfo_children():
             w.destroy()
+        self.ov = self.rbar = self.ov_txt = None
         self.acc = THEMES[self.theme]
         side = tk.Frame(self.root, bg=SIDE, width=210)
         side.pack(side="left", fill="y")
@@ -275,8 +282,9 @@ class App:
         self.main = tk.Frame(self.root, bg=BG)
         self.main.pack(side="left", fill="both", expand=True)
         self.pages = {"Dashboard": self.p_dash, "Tweaks": self.p_tweaks,
-                      "Power CPU/GPU": self.p_power, "Rekam & Screenshot": self.p_rec, "Overlay FPS": self.p_over,
-                      "Tema": self.p_theme}
+                      "Profil Game": self.p_prof, "Power CPU/GPU": self.p_power,
+                      "Rekam & Screenshot": self.p_rec, "Overlay FPS": self.p_over,
+                      "Tema": self.p_theme, "Pengaturan": self.p_set}
         self.navs = {}
         for name in self.pages:
             f = tk.Frame(side, bg=SIDE, cursor="hand2")
@@ -305,7 +313,7 @@ class App:
             f.config(bg=bg)
         for w in self.main.winfo_children():
             w.destroy()
-        self.logbox = None
+        self.logbox = self.msg_lbl = None
         page = tk.Frame(self.main, bg=BG)
         tk.Label(page, text=name, bg=BG, fg=FG, font=(FONT, 20, "bold")).pack(
             anchor="w", padx=30, pady=(24, 12))
@@ -399,6 +407,125 @@ class App:
 
     def do_undo(self):
         threading.Thread(target=undo_all, args=(self.log,), daemon=True).start()
+
+    # ---- profil game
+    def entry(self, p, var, width=18):
+        return tk.Entry(p, textvariable=var, width=width, bg=CARD2, fg=FG, bd=0,
+                        insertbackground=FG, font=(FONT, 9))
+
+    def p_prof(self, b):
+        c = self.card(b)
+        c.pack(fill="x")
+        self.lab(c, t("profiles_desc"), dim=True, wraplength=760).pack(anchor="w", pady=(0, 8))
+        cw, ch = get_current_resolution()
+        self.pf = dict(name=tk.StringVar(), exe=tk.StringVar(), w=tk.StringVar(value=str(cw)),
+                       h=tk.StringVar(value=str(ch)), down=tk.BooleanVar(value=True),
+                       tweak=tk.BooleanVar(value=True), prio=tk.BooleanVar(value=True),
+                       pre=tk.StringVar(value="Preset downscale"))
+        r1 = tk.Frame(c, bg=CARD)
+        r1.pack(fill="x", pady=2)
+        self.lab(r1, "Nama", width=6, anchor="w").pack(side="left")
+        self.entry(r1, self.pf["name"], 16).pack(side="left", padx=(0, 10))
+        self.lab(r1, "Game .exe", anchor="w").pack(side="left")
+        self.entry(r1, self.pf["exe"], 32).pack(side="left", padx=6)
+        Btn(r1, "Pilih...", self.pick_exe, self, False).pack(side="left")
+        r2 = tk.Frame(c, bg=CARD)
+        r2.pack(fill="x", pady=6)
+        self.lab(r2, "Resolusi", width=6, anchor="w").pack(side="left")
+        self.entry(r2, self.pf["w"], 6).pack(side="left")
+        self.lab(r2, " x ").pack(side="left")
+        self.entry(r2, self.pf["h"], 6).pack(side="left", padx=(0, 8))
+        pm = self.menu(r2, self.pf["pre"], "100%", "90%", "75%", "66%", "50%")
+        pm.pack(side="left")
+        self.pf["pre"].trace_add("write", lambda *a: self.preset_res())
+        r3 = tk.Frame(c, bg=CARD)
+        r3.pack(fill="x")
+        self.chk(r3, "Downscale resolusi", self.pf["down"]).pack(side="left", padx=(0, 8))
+        self.chk(r3, "Tweak game (Game Mode, MMCSS, power plan sementara)",
+                 self.pf["tweak"]).pack(side="left", padx=(0, 8))
+        self.chk(r3, "Prioritas CPU High", self.pf["prio"]).pack(side="left")
+        Btn(c, "Tambah Profil", self.add_prof, self).pack(anchor="w", pady=(8, 0))
+        self.prof_list = tk.Frame(b, bg=BG)
+        self.prof_list.pack(fill="x", pady=8)
+        self.msg_lbl = self.lab(b, "", dim=True, wraplength=760)
+        self.msg_lbl.pack(anchor="w")
+        self.render_profs()
+
+    def preset_res(self):
+        try:
+            pc = int(self.pf["pre"].get().rstrip("%"))
+        except ValueError:
+            return
+        cw, ch = get_current_resolution()
+        self.pf["w"].set(str(round(cw * pc / 100 / 2) * 2))
+        self.pf["h"].set(str(round(ch * pc / 100 / 2) * 2))
+
+    def pick_exe(self):
+        from tkinter import filedialog
+        f = filedialog.askopenfilename(filetypes=[("Game", "*.exe")])
+        if f:
+            self.pf["exe"].set(f)
+            if not self.pf["name"].get():
+                self.pf["name"].set(os.path.splitext(os.path.basename(f))[0])
+
+    def add_prof(self):
+        try:
+            p = dict(name=self.pf["name"].get().strip(), exe=self.pf["exe"].get().strip(),
+                     w=int(self.pf["w"].get()), h=int(self.pf["h"].get()),
+                     downscale=self.pf["down"].get(), tweak=self.pf["tweak"].get(),
+                     prio=self.pf["prio"].get())
+            assert p["name"] and os.path.isfile(p["exe"]) and p["w"] > 0 and p["h"] > 0
+        except (ValueError, AssertionError):
+            return messagebox.showwarning("WinTweaks", t("profiles_need_fields"))
+        st = core.load_state()
+        st["profiles"].append(p)
+        core.save_state(st)
+        self.pf["name"].set("")
+        self.pf["exe"].set("")
+        self.render_profs()
+
+    def render_profs(self):
+        for w in self.prof_list.winfo_children():
+            w.destroy()
+        for i, p in enumerate(core.load_state()["profiles"]):
+            r = tk.Frame(self.prof_list, bg=CARD, padx=12, pady=8, highlightthickness=1,
+                         highlightbackground="#26262c")
+            r.pack(fill="x", pady=3)
+            tags = " ".join(k for k, v in (("downscale", p.get("downscale", True)),
+                                            ("tweak", p.get("tweak")), ("prio", p.get("prio"))) if v)
+            self.lab(r, f"{p['name']}   {p['w']}x{p['h']}   [{tags}]", bold=True).pack(
+                side="left")
+            Btn(r, "Hapus", lambda i=i: self.del_prof(i), self, False).pack(side="right")
+            Btn(r, "Jalankan", lambda p=p: self.run_prof(p), self).pack(side="right", padx=6)
+
+    def del_prof(self, i):
+        st = core.load_state()
+        if 0 <= i < len(st["profiles"]):
+            st["profiles"].pop(i)
+            core.save_state(st)
+        self.render_profs()
+
+    def run_prof(self, p):
+        if not os.path.isfile(p["exe"]):
+            return messagebox.showwarning("WinTweaks", "File exe tidak ditemukan.")
+        threading.Thread(target=core.launch_profile, args=(p, self.log), daemon=True).start()
+
+    # ---- pengaturan
+    def p_set(self, b):
+        c = self.card(b)
+        c.pack(fill="x")
+        self.lab(c, "Komunitas", bold=True).pack(anchor="w")
+        self.lab(c, "Join grup Telegram untuk update, bantuan, dan info terbaru.",
+                 dim=True).pack(anchor="w", pady=6)
+        r = tk.Frame(c, bg=CARD)
+        r.pack(anchor="w")
+        Btn(r, "Join Telegram", lambda: webbrowser.open(TELEGRAM), self).pack(side="left")
+        self.lab(r, TELEGRAM, dim=True).pack(side="left", padx=12)
+        d = self.card(b)
+        d.pack(fill="x", pady=10)
+        self.lab(d, "Tentang", bold=True).pack(anchor="w")
+        self.lab(d, f"Developer: {DEV_NAME}\nArkael Win Tweaks - universal CPU & GPU", dim=True).pack(
+            anchor="w", pady=6)
 
     def p_power(self, b):
         c = self.card(b)
@@ -501,6 +628,7 @@ class App:
             self, False).pack(side="left")
         self.rec_msg = self.lab(c, "", dim=True)
         self.rec_msg.pack(anchor="w", pady=8)
+        self.msg_lbl = self.rec_msg
 
     def notify(self, msg):
         self.toast = (msg, time.time() + 2.5)
@@ -577,79 +705,177 @@ class App:
             self.rec = None
             self.notify("Rekaman berhenti")
         rec_on = bool(self.rec)
+        el = int(time.time() - self.rec_t0) if rec_on else 0
+        clock = f"{el // 60:02d}:{el % 60:02d}"
         try:
             if self.rec_btn is not None and self.rec_btn.winfo_exists():
                 self.rec_btn.config(text="■ Stop Rekam" if rec_on else "● Mulai Rekam")
         except Exception:
             pass
+        self.sync_rbar(rec_on, clock)
         if self.ov:
             try:
+                blink = int(time.time() * 2) % 2
                 if rec_on:
-                    el = int(time.time() - self.rec_t0)
-                    blink = int(time.time() * 2) % 2
-                    self.ov_rec.config(text=f"■ REC {el // 60:02d}:{el % 60:02d}  F9",
-                                       bg="#e01b24" if blink else "#8a1016")
+                    self.ov_rec.config(text=f"■ STOP {clock}", bg="#e01b24" if blink else "#8a1016")
+                elif self.rec_busy:
+                    self.ov_rec.config(text="… MEMULAI", bg="#8a1016")
                 else:
                     self.ov_rec.config(text="● REC  F9", bg="#26262c")
                 f = self.stats.fps_now()
-                self.ov_fps.config(text=f"{f} FPS" if f else "-- FPS")
+                if self.ov_txt:
+                    st = self.stats
+                    self.ov_txt.config(text=f"CPU {st.cpu:.0f}%   GPU {st.gpu:.0f}%   "
+                                            f"RAM {st.ram:.0f}%   {f if f else '--'} FPS")
+                else:
+                    self.ov_fps.config(text=f"{f} FPS" if f else "-- FPS")
                 msg, until = self.toast
                 self.ov_toast.config(text=msg if time.time() < until else
                                      (self.stats.fps_msg if not f else ""))
             except tk.TclError:
                 pass
 
+    def sync_rbar(self, rec_on, clock):
+        """Tombol STOP mengambang: muncul otomatis saat merekam & overlay mati."""
+        want = rec_on and not self.ov
+        try:
+            if want and not self.rbar:
+                o = tk.Toplevel(self.root)
+                o.overrideredirect(True)
+                o.attributes("-topmost", True)
+                o.geometry(f"+{max(0, self.root.winfo_screenwidth() // 2 - 80)}+12")
+                self.rbar_lb = tk.Label(o, text="■ STOP", bg="#e01b24", fg="#ffffff", cursor="hand2",
+                                        font=(FONT, 14, "bold"), padx=22, pady=8)
+                self.rbar_lb.pack()
+                self.rbar_lb.bind("<Button-1>", lambda e: self.stop_rec())
+                self.rbar = o
+            elif not want and self.rbar:
+                self.rbar.destroy()
+                self.rbar = None
+            if self.rbar:
+                self.rbar_lb.config(text=f"■ STOP  {clock}",
+                                    bg="#e01b24" if int(time.time() * 2) % 2 else "#8a1016")
+        except tk.TclError:
+            self.rbar = None
+
     # ---- overlay
     def p_over(self, b):
         c = self.card(b)
         c.pack(fill="x")
-        self.lab(c, "Cincin animasi CPU / GPU / RAM + FPS + tombol Rekam & Screenshot di layar. "
-                    "Hotkey global: F9 = rekam on/off, F10 = screenshot. Seret untuk pindah. "
-                    "Jalan di game windowed / borderless.", dim=True,
-                 wraplength=700).pack(anchor="w", pady=(0, 10))
+        self.lab(c, "CPU / GPU / RAM + FPS + tombol REC/STOP & Screenshot di atas layar. "
+                    "Hotkey global: F9 = rekam/stop, F10 = screenshot. Seret untuk pindah, "
+                    "scroll mouse di overlay untuk besar/kecil. Jalan di game windowed / borderless.",
+                 dim=True, wraplength=760).pack(anchor="w", pady=(0, 10))
         self.ov_btn = Btn(c, "Matikan Overlay" if self.ov else "Nyalakan Overlay", self.toggle_ov, self)
         self.ov_btn.pack(anchor="w")
-        self.lab(c, "FPS otomatis: PresentMon diunduh sekali saat overlay pertama dinyalakan (butuh internet). FPS muncul setelah game berjalan.", dim=True,
-                 wraplength=700).pack(anchor="w", pady=10)
+        r = tk.Frame(c, bg=CARD)
+        r.pack(fill="x", pady=(12, 0))
+        self.lab(r, "Ukuran", width=8, anchor="w").pack(side="left")
+        Btn(r, "−", lambda: self.set_ov_scale(self.ov_scale - .1), self, False).pack(side="left")
+        self.ov_sv = tk.IntVar(value=int(self.ov_scale * 100))
+        sc = self.scale(r, self.ov_sv, from_=50, to=250, orient="horizontal", length=300,
+                        showvalue=True)
+        sc.pack(side="left", padx=8)
+        sc.bind("<ButtonRelease-1>", lambda e: self.set_ov_scale(self.ov_sv.get() / 100))
+        Btn(r, "+", lambda: self.set_ov_scale(self.ov_scale + .1), self, False).pack(side="left")
+        r = tk.Frame(c, bg=CARD)
+        r.pack(fill="x", pady=8)
+        self.lab(r, "Tampilan", width=8, anchor="w").pack(side="left")
+        self.ov_modev = tk.StringVar(value=self.ov_mode)
+        self.menu(r, self.ov_modev, "Cincin", "Teks kecil").pack(side="left")
+        self.ov_modev.trace_add("write", lambda *a: self.set_ov_mode(self.ov_modev.get()))
+        self.lab(c, "FPS otomatis: PresentMon diunduh sekali saat overlay pertama dinyalakan "
+                    "(butuh internet). FPS muncul setelah game berjalan.", dim=True,
+                 wraplength=760).pack(anchor="w", pady=6)
+
+    def set_ov_scale(self, v):
+        self.ov_scale = max(.5, min(2.5, round(v, 2)))
+        try:
+            self.ov_sv.set(int(self.ov_scale * 100))
+        except Exception:
+            pass
+        if self.ov:
+            self.root.after(1, self.build_ov)
+
+    def set_ov_mode(self, m):
+        self.ov_mode = m
+        if self.ov:
+            self.root.after(1, self.build_ov)
 
     def toggle_ov(self):
         if self.ov:
             self.ov.destroy()
-            self.ov = None
-            return self.ov_btn.config(text="Nyalakan Overlay")
+            self.ov = self.ov_txt = None
+            try:
+                self.ov_btn.config(text="Nyalakan Overlay")
+            except Exception:
+                pass
+            return
         self.stats.start_fps()
+        self.build_ov(30, 30)
+        try:
+            self.ov_btn.config(text="Matikan Overlay")
+        except Exception:
+            pass
+
+    def build_ov(self, x=30, y=30):
+        if self.ov:
+            x, y = self.ov.winfo_x(), self.ov.winfo_y()
+            self.ov.destroy()
+        s, ring = self.ov_scale, self.ov_mode == "Cincin"
+        T, P = "#010101", "#101014"
+        bgc = T if ring else P
         o = tk.Toplevel(self.root)
         o.overrideredirect(True)
         o.attributes("-topmost", True)
-        o.config(bg="#010101")
-        o.attributes("-transparentcolor", "#010101")
-        o.geometry("+30+30")
-        top = tk.Frame(o, bg="#010101")
-        top.pack(anchor="w")
-        for lbl, fn in (("CPU", lambda: self.stats.cpu), ("GPU", lambda: self.stats.gpu),
-                        ("RAM", lambda: self.stats.ram)):
-            Ring(top, lbl, 96, self.acc, fn, bg="#010101").pack(side="left")
-        self.ov_fps = tk.Label(top, bg="#010101", fg=self.acc[0], font=(FONT, 24, "bold"),
-                               text="-- FPS")
-        self.ov_fps.pack(side="left", padx=8)
-        bar = tk.Frame(o, bg="#010101")
-        bar.pack(anchor="w", pady=(2, 0))
-        def pill(text, cmd):
-            l = tk.Label(bar, text=text, bg="#26262c", fg=FG, font=(FONT, 10, "bold"),
-                         padx=12, pady=5, cursor="hand2")
+        o.config(bg=bgc)
+        if ring:
+            o.attributes("-transparentcolor", T)
+        else:
+            o.attributes("-alpha", .92)
+        o.geometry(f"+{x}+{y}")
+        top = tk.Frame(o, bg=bgc)
+        top.pack(anchor="w", padx=0 if ring else 8, pady=0 if ring else 6)
+        if ring:
+            self.ov_txt = None
+            for lbl, fn in (("CPU", lambda: self.stats.cpu), ("GPU", lambda: self.stats.gpu),
+                            ("RAM", lambda: self.stats.ram)):
+                Ring(top, lbl, int(90 * s), self.acc, fn, bg=T).pack(side="left")
+            self.ov_fps = tk.Label(top, bg=T, fg=self.acc[0], text="-- FPS",
+                                   font=(FONT, max(10, int(22 * s)), "bold"))
+            self.ov_fps.pack(side="left", padx=8)
+        else:
+            self.ov_txt = tk.Label(top, bg=P, fg=FG, text="CPU --%   GPU --%   RAM --%   -- FPS",
+                                   font=("Consolas", max(8, int(11 * s)), "bold"))
+            self.ov_txt.pack(side="left")
+        bar = tk.Frame(o, bg=bgc)
+        bar.pack(anchor="w", padx=0 if ring else 8, pady=(2, 4))
+        fs, px, py = max(8, int(10 * s)), max(6, int(12 * s)), max(3, int(5 * s))
+        def pill(text, cmd, bg="#26262c"):
+            l = tk.Label(bar, text=text, bg=bg, fg=FG, font=(FONT, fs, "bold"),
+                         padx=px, pady=py, cursor="hand2")
             l.pack(side="left", padx=(0, 6))
             l.bind("<Button-1>", lambda e: cmd())
             return l
         self.ov_rec = pill("● REC  F9", self.toggle_rec)
         pill("SHOT  F10", self.shot)
-        self.ov_toast = tk.Label(o, bg="#010101", fg=FG, font=(FONT, 9, "bold"), anchor="w")
-        self.ov_toast.pack(anchor="w", pady=(3, 0))
+        pill("−", lambda: self.set_ov_scale(self.ov_scale - .1))
+        pill("+", lambda: self.set_ov_scale(self.ov_scale + .1))
+        self.ov_toast = tk.Label(o, bg=bgc, fg=FG, font=(FONT, max(8, int(9 * s)), "bold"),
+                                 anchor="w")
+        self.ov_toast.pack(anchor="w", pady=(0, 3), padx=0 if ring else 8)
         d = {}
-        for w in (o, top):
-            w.bind("<Button-1>", lambda e: d.update(x=e.x_root - o.winfo_x(), y=e.y_root - o.winfo_y()))
-            w.bind("<B1-Motion>", lambda e: o.geometry(f"+{e.x_root - d['x']}+{e.y_root - d['y']}"))
+        def press(e):
+            d.update(x=e.x_root - o.winfo_x(), y=e.y_root - o.winfo_y())
+        def drag(e):
+            o.geometry(f"+{e.x_root - d['x']}+{e.y_root - d['y']}")
+        def wheel(e):
+            self.set_ov_scale(self.ov_scale + (.1 if e.delta > 0 else -.1))
+        for w in (o, top, bar, *top.winfo_children()):
+            w.bind("<Button-1>", press)
+            w.bind("<B1-Motion>", drag)
+            w.bind("<MouseWheel>", wheel)
         self.ov = o
-        self.ov_btn.config(text="Matikan Overlay")
 
     def p_theme(self, b):
         for n, (a1, a2) in THEMES.items():
@@ -675,14 +901,15 @@ class App:
                 elif self.logbox:
                     self.logbox.insert("end", m + "\n")
                     self.logbox.see("end")
-                elif self.cur_page.startswith("Rekam"):
-                    self.rec_msg.config(text=m)
+                elif self.msg_lbl:
+                    self.msg_lbl.config(text=m)
         except (queue.Empty, tk.TclError):
             pass
         self.refresh_ui()
         try:
             if self.cur_page == "Dashboard":
-                self.gpu_lbl.config(text=f"GPU: {self.stats.gpu_name}")
+                self.gpu_lbl.config(text=f"CPU: {self.stats.cpu_name}   |   "
+                                         f"GPU: {self.stats.gpu_name}")
         except tk.TclError:
             pass
         self.root.after(200, self.poll)
