@@ -1477,10 +1477,7 @@ class App:
                 st, f = self.stats, self.stats.fps_now()
                 tmp = lambda v: f"{v:.0f}°C" if v else "--"
                 if self.ov_rows:
-                    self.ov_rows["cpu"].config(text=f"{st.cpu:.0f}%  {tmp(st.cpu_t)}")
-                    self.ov_rows["gpu"].config(text=f"{st.gpu:.0f}%  {tmp(st.gpu_t)}")
-                    self.ov_rows["ram"].config(text=f"{st.ram:.0f}%")
-                    self.ov_rows["fps"].config(text=f"{f}" if f else "--")
+                    pass  # baris teks dianimasikan timer sendiri (_ov_tick)
                 else:
                     self.ov_fps.config(text=f"{f} FPS" if f else "-- FPS")
                     self.ov_temp.config(text=f"CPU {tmp(st.cpu_t)}   GPU {tmp(st.gpu_t)}")
@@ -1623,7 +1620,42 @@ class App:
         self.ov = FloatWin(self, "ov", self.fill_ov, x, y, self.scales["ov"],
                            self.ov_is_clear(), self.ov_alpha_eff())
 
+    def _ov_tick(self, a):
+        """Animasi Teks kecil (20x/dtk): angka mengalir halus ke nilai terbaru, bar mini, titik LIVE."""
+        if getattr(self, "ov_anim", None) is not a or not self.ov:
+            return  # overlay sudah ditutup / dibangun ulang -> timer lama berhenti
+        try:
+            st = self.stats
+            tmp = lambda v: f"{v:.0f}°C" if v else "--"
+            fps = st.fps_now()
+            tg = {"cpu": st.cpu, "gpu": st.gpu, "ram": st.ram, "fps": fps or 0}
+            for k, (lab, bar) in a["rows"].items():
+                cur = a["cur"].get(k, 0.0)
+                cur += (float(tg[k] or 0) - cur) * .25
+                a["cur"][k] = cur
+                if k == "cpu":
+                    txt = f"{cur:.0f}%  {tmp(st.cpu_t)}"
+                elif k == "gpu":
+                    txt = f"{cur:.0f}%  {tmp(st.gpu_t)}"
+                elif k == "ram":
+                    txt = f"{cur:.0f}%"
+                else:
+                    txt = f"{cur:.0f}" if fps else "--"
+                if lab.cget("text") != txt:
+                    lab.config(text=txt)
+                if bar is not None:
+                    bar.coords("b", 0, 0, a["bw"] * max(0.0, min(100.0, cur)) / 100, a["bh"])
+                    bar.itemconfig("b", fill=mix(self.acc[0], self.acc[1], min(1, cur / 100)))
+            p = (math.sin(time.time() * 4) + 1) / 2  # denyut
+            a["dot"].config(fg=mix(DIM, self.acc[0], p))
+        except tk.TclError:
+            return
+        except Exception:
+            pass
+        self.root.after(50, lambda: self._ov_tick(a))
+
     def fill_ov(self, f, s):
+        self.ov_anim = None  # timer Teks kecil lama berhenti saat dibangun ulang
         bgc = f["bg"]
         self.ov_rows = self.ov_cv = None
         if self.ov_mode == "Cincin":
@@ -1638,18 +1670,34 @@ class App:
             self.ov_temp = tk.Label(f, bg=bgc, fg=FG, text="CPU --   GPU --",
                                     font=(FONT, max(8, int(10 * s)), "bold"))
             self.ov_temp.pack(anchor="w", pady=(2, 0))
-        else:  # teks kecil: panel HUD (rounded, judul, baris stat, grafik mini)
-            try:
-                has_bat = psutil.sensors_battery() is not None
-            except Exception:
-                has_bat = False
-            self.ov_s, self.ov_bat = s, has_bat
-            n = 5 + (1 if has_bat else 0)
-            self.ov_wh = (int(250 * s), int((46 + n * 25 + 62) * s))
-            self.ov_cv = tk.Canvas(f, width=self.ov_wh[0], height=self.ov_wh[1], bg=f["bg"],
-                                   highlightthickness=0)
-            self.ov_cv.pack()
-            self.draw_ov()
+        else:  # teks kecil: daftar rapi + bar mini, dianimasikan timer sendiri
+            bgc = f["bg"]
+            fs = max(8, int(11 * s))
+            bw, bh = max(40, int(60 * s)), max(5, int(7 * s))
+            self.ov_rows, rows = {}, {}
+            head = tk.Frame(f, bg=bgc)
+            head.pack(fill="x")
+            dot = tk.Label(head, text="●", bg=bgc, fg=self.acc[0], font=("Consolas", max(7, int(8 * s))))
+            dot.pack(side="left")
+            tk.Label(head, text=" LIVE", bg=bgc, fg=DIM,
+                     font=("Consolas", max(7, int(8 * s)), "bold")).pack(side="left")
+            for name, key in (("CPU", "cpu"), ("GPU", "gpu"), ("RAM", "ram"), ("FPS", "fps")):
+                r = tk.Frame(f, bg=bgc)
+                r.pack(fill="x")
+                tk.Label(r, text=name, width=4, anchor="w", bg=bgc, fg=self.acc[0],
+                         font=("Consolas", fs, "bold")).pack(side="left")
+                v = tk.Label(r, text="--", width=11, anchor="w", bg=bgc, fg=FG,
+                             font=("Consolas", fs, "bold"))
+                v.pack(side="left")
+                bar = None
+                if key != "fps":
+                    bar = tk.Canvas(r, width=bw, height=bh, bg=CARD2, highlightthickness=0)
+                    bar.pack(side="left", padx=(4, 0))
+                    bar.create_rectangle(0, 0, 0, bh, width=0, fill=self.acc[0], tags="b")
+                rows[key] = (v, bar)
+                self.ov_rows[key] = v
+            a = self.ov_anim = {"rows": rows, "cur": {}, "dot": dot, "bw": bw, "bh": bh}
+            self.root.after(50, lambda: self._ov_tick(a))
         self.ov_msg = tk.Label(f, bg=bgc, fg=DIM, font=(FONT, max(7, int(8 * s))), anchor="w")
         self.ov_msg.pack(anchor="w")
 
