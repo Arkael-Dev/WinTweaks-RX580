@@ -23,13 +23,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller psutil pillow numpy scipy pyaudiowpatch
+        run: pip install pyinstaller psutil pillow
 
       - name: Build exe
         run: >
           pyinstaller --onefile --noconsole --uac-admin
           --name WinTweaks
-          --collect-all pyaudiowpatch
           --icon assets/icon.ico
           --add-data "assets;assets"
           wintweaks.py

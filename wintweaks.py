@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""WinTweaks CPU GPU Universal - tweak, power, record, overlay, audio FX."""
+"""WinTweaks CPU GPU Universal - tweak, power, record, overlay."""
 import ctypes, glob, math, os, queue, shutil, subprocess, sys, threading
 import time, urllib.request, zipfile
 import tkinter as tk
@@ -12,13 +12,6 @@ import core
 from core import (run, run_ps, t, TWEAKS, apply_tweaks, undo_all,
                   get_current_resolution, EXE_DIR, BASE_DIR, NO_WINDOW)
 
-try:
-    import numpy as np
-    from scipy.signal import sosfilt
-    import pyaudiowpatch as pyaudio
-except Exception:  # audio FX opsional
-    pyaudio = None
-
 THEMES = {"Radeon Red": ("#ff2d3a", "#ff8a3d"), "Cyber Cyan": ("#19e6ff", "#7b5cff"),
           "Neon Purple": ("#b45cff", "#ff4fd8"), "Matrix Green": ("#2dff8a", "#d4ff3d")}
 BG, SIDE, CARD, CARD2, FG, DIM = "#0b0c10", "#101218", "#171a22", "#1f232d", "#f1f3f8", "#8b92a5"
@@ -26,13 +19,6 @@ FONT = "Segoe UI"
 PICS = os.path.join(os.path.expanduser("~"), "Pictures", "WinTweaks")
 FF_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "WinTweaks", "ffmpeg")
 FF_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
-PRESETS = {"Flat": [0] * 10, "Bass Boost": [7, 6, 4, 2, 0, 0, 0, 0, 0, 0],
-           "Vocal Jernih": [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1],
-           "Gaming FPS": [-3, -2, 0, 0, 1, 3, 5, 5, 3, 1],
-           "Cinema 3D": [5, 4, 2, 0, -1, 0, 2, 4, 5, 4]}
-
-
 def mix(c1, c2, f):
     a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
     b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
@@ -162,68 +148,6 @@ class Btn(tk.Label):
             pass
 
 
-# ------------------------------------------------------------ audio fx
-class AudioFX:
-    def __init__(self):
-        self.gains, self.pre, self.run_, self.err = [0.0] * 10, 0.0, False, ""
-
-    def _sos(self, fs):
-        out = []
-        for f, g in zip(BANDS, self.gains):
-            A, w0 = 10 ** (g / 40), 2 * math.pi * f / fs
-            al = math.sin(w0) / 2.2
-            b0, b1, b2 = 1 + al * A, -2 * math.cos(w0), 1 - al * A
-            a0, a1, a2 = 1 + al / A, -2 * math.cos(w0), 1 - al / A
-            out.append([b0 / a0, b1 / a0, b2 / a0, 1, a1 / a0, a2 / a0])
-        return np.array(out)
-
-    def outputs(self):
-        if not pyaudio:
-            return []
-        p = pyaudio.PyAudio()
-        res = [d["name"] for d in (p.get_device_info_by_index(i) for i in range(p.get_device_count()))
-               if d["maxOutputChannels"] > 0 and not d.get("isLoopbackDevice")]
-        p.terminate()
-        return list(dict.fromkeys(res))
-
-    def start(self, out_name):
-        if not pyaudio:
-            self.err = "Modul audio tidak ada di build ini."
-            return
-        self.run_ = True
-        threading.Thread(target=self._work, args=(out_name,), daemon=True).start()
-
-    def stop(self):
-        self.run_ = False
-
-    def _work(self, out_name):
-        p = pyaudio.PyAudio()
-        try:
-            lb = p.get_default_wasapi_loopback()
-            out = next(d for d in (p.get_device_info_by_index(i) for i in range(p.get_device_count()))
-                       if out_name in d["name"] and d["maxOutputChannels"] > 0
-                       and not d.get("isLoopbackDevice"))
-            fs, ch = int(lb["defaultSampleRate"]), lb["maxInputChannels"]
-            ins = p.open(format=pyaudio.paInt16, channels=ch, rate=fs, input=True,
-                         input_device_index=lb["index"], frames_per_buffer=1024)
-            outs = p.open(format=pyaudio.paInt16, channels=ch, rate=fs, output=True,
-                          output_device_index=out["index"])
-            sos, zi = self._sos(fs), None
-            zi = np.zeros((sos.shape[0], 2, ch))
-            while self.run_:
-                x = np.frombuffer(ins.read(1024, exception_on_overflow=False), np.int16)
-                x = x.reshape(-1, ch).astype(np.float32)
-                sos = self._sos(fs)
-                y, zi = sosfilt(sos, x, axis=0, zi=zi)
-                y *= 10 ** (self.pre / 20)
-                outs.write(np.clip(y, -32768, 32767).astype(np.int16).tobytes())
-        except Exception as e:
-            self.err = f"Audio FX gagal: {e}"
-        finally:
-            self.run_ = False
-            p.terminate()
-
-
 # ------------------------------------------------------------ app
 class App:
     def __init__(self):
@@ -237,7 +161,7 @@ class App:
             self.root.iconbitmap(ico)
         self.theme, self.cur_page = "Radeon Red", "Dashboard"
         self.acc = THEMES[self.theme]
-        self.stats, self.fx, self.q = Stats(), AudioFX(), queue.Queue()
+        self.stats, _, self.q = Stats(), None, queue.Queue()
         self.rec = self.ov = self.logbox = None
         self.checks = {}
         self.build()
@@ -262,8 +186,7 @@ class App:
         self.main = tk.Frame(self.root, bg=BG)
         self.main.pack(side="left", fill="both", expand=True)
         self.pages = {"Dashboard": self.p_dash, "Tweaks": self.p_tweaks,
-                      "Power CPU/GPU": self.p_power, "Audio FX": self.p_audio,
-                      "Rekam & Screenshot": self.p_rec, "Overlay FPS": self.p_over,
+                      "Power CPU/GPU": self.p_power, "Rekam & Screenshot": self.p_rec, "Overlay FPS": self.p_over,
                       "Tema": self.p_theme}
         self.navs = {}
         for name in self.pages:
@@ -440,47 +363,6 @@ class App:
         else:
             messagebox.showinfo("WinTweaks", "AMD Software belum terpasang.")
 
-    def p_audio(self, b):
-        c = self.card(b)
-        c.pack(fill="x")
-        self.lab(c, "FX Sound Engine - EQ bawaan app, tanpa Equalizer APO", bold=True).pack(anchor="w")
-        self.lab(c, "Menangkap suara sistem lalu mengolahnya. Pilih output (headset / speaker lain) "
-                    "yang BEDA dari output default Windows supaya suara tidak dobel.",
-                 dim=True, wraplength=700).pack(anchor="w", pady=(2, 8))
-        outs = self.fx.outputs() or ["(tidak ada)"]
-        self.outv = tk.StringVar(value=outs[0])
-        self.menu(c, self.outv, *outs).pack(anchor="w")
-        pr = tk.Frame(c, bg=CARD)
-        pr.pack(anchor="w", pady=8)
-        self.sliders = []
-        for n, g in PRESETS.items():
-            Btn(pr, n, lambda g=g: [s.set(v) for s, v in zip(self.sliders, g)], self, False).pack(
-                side="left", padx=3)
-        sl = tk.Frame(c, bg=CARD)
-        sl.pack(pady=6)
-        for i, f in enumerate(BANDS):
-            col = tk.Frame(sl, bg=CARD)
-            col.pack(side="left", padx=7)
-            s = self.scale(col, from_=12, to=-12, orient="vertical", length=140, width=14,
-                           command=lambda v, i=i: self.fx.gains.__setitem__(i, float(v)))
-            s.set(self.fx.gains[i])
-            s.pack()
-            self.sliders.append(s)
-            self.lab(col, f"{f // 1000}k" if f >= 1000 else str(f), dim=True, size=8).pack()
-        self.fx_btn = Btn(c, "Matikan FX" if self.fx.run_ else "Nyalakan FX", self.toggle_fx, self)
-        self.fx_btn.pack(anchor="w", pady=6)
-        self.fx_msg = self.lab(c, "", dim=True)
-        self.fx_msg.pack(anchor="w")
-
-    def toggle_fx(self):
-        if self.fx.run_:
-            self.fx.stop()
-            self.fx_btn.config(text="Nyalakan FX")
-        else:
-            self.fx.err = ""
-            self.fx.start(self.outv.get())
-            self.fx_btn.config(text="Matikan FX")
-
     # ---- rekam
     def ffmpeg(self):
         p = shutil.which("ffmpeg") or os.path.join(FF_DIR, "ffmpeg.exe")
@@ -632,8 +514,6 @@ class App:
         try:
             if self.cur_page == "Dashboard":
                 self.gpu_lbl.config(text=f"GPU: {self.stats.gpu_name}")
-            elif self.cur_page == "Audio FX" and self.fx.err:
-                self.fx_msg.config(text=self.fx.err)
         except tk.TclError:
             pass
         self.root.after(200, self.poll)
