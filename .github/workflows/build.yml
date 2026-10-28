@@ -3,12 +3,16 @@ name: Build WinTweaks.exe
 on:
   push:
     branches: [ main ]
+    tags: [ "v*" ]
     paths:
       - "wintweaks.py"
       - "core.py"
       - "assets/**"
       - ".github/workflows/build.yml"
   workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   build:
