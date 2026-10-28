@@ -1,16 +1,70 @@
 # WinTweaks CPU GPU Universal
 
-Aplikasi tweak Windows 10/11 bertema modern (animasi, 4 tema warna) untuk
-semua PC. Fitur khusus GPU (Adrenalin, encoder AMF) aktif otomatis di AMD.
+A modern Windows 10/11 tweak utility with animated UI and four color themes, built for any PC. GPU-specific features (AMD Adrenalin shortcuts, AMF encoder) are enabled automatically on AMD hardware.
 
-- **Dashboard**: cincin animasi CPU / GPU / RAM live
-- **Tweaks**: power plan, Game Mode, MMCSS, bersih-bersih (bisa di-Undo)
-- **Power CPU/GPU**: min/max CPU, Turbo Boost, PCIe, buka AMD Software
-- **Rekam & Screenshot**: pilih resolusi & FPS, ffmpeg diunduh otomatis
-- **Profil Game**: downscale resolusi + tweak + prioritas CPU per game, otomatis kembali saat game ditutup
-- **Overlay**: 2 jendela terpisah - (1) Statistik CPU/GPU/RAM + suhu + FPS (mode Cincin / Teks kecil), (2) Rekam: tombol REC/STOP & Screenshot (otomatis muncul saat merekam). Seret untuk pindah, tarik pojok ◢ pakai mouse untuk ubah ukuran (FPS lewat PresentMon, otomatis)
-- **Pengaturan**: bahasa Indonesia / English, link Telegram https://t.me/arkaelkernel
+## Features
 
-Dev: Arkael-Dev
+- **Dashboard**: live animated rings for CPU, GPU and RAM usage
+- **Tweaks**: power plan, Game Mode, MMCSS and system cleanup, all reversible with Undo
+- **CPU/GPU Power**: min/max CPU state, Turbo Boost, PCIe power settings, quick access to AMD Software
+- **Record & Screenshot**: choose resolution and FPS, with ffmpeg downloaded automatically on first use
+- **Game Profiles**: per-game resolution downscale, tweaks and CPU priority, restored automatically when the game closes
+- **Overlay**: two separate windows
+  - Stats: CPU/GPU/RAM, temperature and FPS (Ring or compact Text mode)
+  - Record: REC/STOP and Screenshot buttons, shown automatically while recording
+  - Drag to move, pull the ◢ corner to resize. FPS is read through PresentMon automatically
+- **Settings**: Indonesian / English language, Telegram community link
 
-Build otomatis lewat GitHub Actions (push ke `main`) -> Artifacts `WinTweaks-exe`.
+## Download
+
+Get the latest `WinTweaks.exe` from the [Releases](../../releases) page.
+
+## Requirements
+
+- Windows 10 or 11
+- Administrator rights (the app requests elevation on launch)
+
+## Build from source
+
+```bash
+pip install pyinstaller psutil pillow
+pyinstaller --onefile --noconsole --uac-admin --name WinTweaks --icon assets/icon.ico --add-data "assets;assets" wintweaks.py
+```
+
+The executable is written to `dist/WinTweaks.exe`. Pushing a tag such as `v1.0.0` also builds it on GitHub Actions and publishes it to Releases.
+
+## Disclaimer
+
+This tool changes system settings. A restore point can be created before applying tweaks, and most changes can be reverted with Undo. Use at your own risk.
+
+## Community
+
+Telegram: https://t.me/arkaelkernel
+
+## License
+
+MIT License
+
+Copyright (c) 2026 Arkael-Dev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Developed by [Arkael-Dev](https://github.com/Arkael-Dev)
