@@ -1774,15 +1774,15 @@ class App:
             self.logbox_err(f"UI: {e}")
         try:
             if self.cur_page == "Dashboard":
-            full_txt = f"  🔥 ARKAEL RADEON ENGINE ACTIVE  ===  CPU: {L(self.stats.cpu_name)}   |   GPU: {L(self.stats.gpu_name)}  ===  OPTIMIZED FOR PERFORMANCE  "
-            curr = getattr(self, "_anim_offset", 0)
-            curr = (curr + 1) % len(full_txt)
-            self._anim_offset = curr
-            anim_display = full_txt[curr:] + full_txt[:curr]
-            try:
-                self.gpu_lbl.config(text=anim_display)
-            except Exception:
-                pass
+                full_txt = f"  🔥 ARKAEL RADEON ENGINE ACTIVE  ===  CPU: {L(self.stats.cpu_name)}   |   GPU: {L(self.stats.gpu_name)}  ===  OPTIMIZED FOR PERFORMANCE  "
+                curr = getattr(self, "_anim_offset", 0)
+                curr = (curr + 1) % len(full_txt)
+                self._anim_offset = curr
+                anim_display = full_txt[curr:] + full_txt[:curr]
+                try:
+                    self.gpu_lbl.config(text=anim_display)
+                except Exception:
+                    pass
         except Exception:
             pass
         self.root.after(200, self.poll)  # loop ini harus selalu lanjut
